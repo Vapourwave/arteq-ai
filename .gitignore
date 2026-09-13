@@ -1,0 +1,23 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Audio recordings and temporary test media
+*.wav
+*.mp3
+*.pcm
+scratch/
+apps/backend/scratch/
+
+# Coverage and cache
+coverage/
+.turbo/
+.cache/
+

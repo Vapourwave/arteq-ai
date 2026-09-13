@@ -1,0 +1,16 @@
+{
+  "name": "arteq-ai",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ARTEQ AI — Portable AI Receptionist for Hospitals",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace apps/backend",
+    "dev:kiosk": "npm run dev --workspace apps/kiosk",
+    "build": "npm run build --workspace packages/shared && npm run build --workspace apps/backend && npm run build --workspace apps/kiosk",
+    "typecheck": "npm run typecheck --workspace packages/shared && npm run typecheck --workspace apps/backend && npm run typecheck --workspace apps/kiosk"
+  }
+}

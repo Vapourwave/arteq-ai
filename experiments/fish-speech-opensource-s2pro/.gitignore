@@ -1,0 +1,10 @@
+# Never commit model weights (CTO instruction — isolated experiment only).
+weights/
+output/
+*.safetensors
+*.pth
+*.wav
+
+# Never commit the HuggingFace access token needed for the gated
+# openaudio-s1-mini repo.
+.env

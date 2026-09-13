@@ -1,0 +1,6 @@
+{
+  "name": "ABC Hospital Front Desk",
+  "description": "Modern Hospital Front Desk & Patient Flow Management System prototype",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

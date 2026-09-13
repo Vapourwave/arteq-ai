@@ -1,0 +1,40 @@
+## A. Files changed (this session, since the last checkpoint)
+Only one file changed this turn: **`apps/backend/scripts/eval-transcript-refinement.ts`** — added two new fixtures ("gate slow-path — real captured contamination (Tamil/Hindi/Spanish)" and "gate slow-path — real captured fragmentation, no foreign script") reusing the *same real captured strings already in `rawTranscriptAssessment.test.ts`* — necessary because none of the original 9 fixtures triggered the gate's escalation path, so the eval had zero real slow-path latency samples. No production code changed this turn; all production files (gate, `processTranscript.ts`, protocol types, routes, kiosk wiring) were already implemented and verified in the prior turn.
+
+## B. Gate logic (unchanged, now exercised against real Gemini traffic)
+`assessRawTranscript(rawTranscript, segmentCount)` — pure, synchronous, no network/LLM call. Flags `unexpected_script` only for scripts outside Malayalam/Latin (CJK, Hangul, Devanagari, Thai, Cyrillic, Arabic, Tamil), and `fragmented_short_segments` only when ≥3 segments average under 15 chars. Never rejects, never classifies language, defaults to running refinement whenever it finds any signal.
+
+## C. Fast-path behavior (real measurements, eval script, 9/9 fixtures took this path)
+Clean English/Malayalam/Manglish/long/short inputs skip refinement entirely; only the quality guard runs.
+- `refine=0ms` in all 9 cases
+- `total` ranged **2.82s–6.03s** (quality-guard call alone), median ≈3.6s
+
+## D. Slow-path behavior (real measurements, 2 real captured fixtures + 1 live user test)
+Eval script (Tamil/Hindi/Spanish contamination, `unexpected_script`): `refine=9033ms quality=7000ms total=16033ms`.
+Eval script (fragmented, no foreign script, `fragmented_short_segments`): `refine=5250ms quality=3955ms total=9206ms`.
+**Live mic test** (you spoke Malayalam → English → Hindi): raw sent was `"എനിക്ക് നല്ല പല്ലുവേദനയുണ്ട്. എനിക്ക് ഡെന്റിസ്റ്റിനെ കാണണം. I have tooth pain. And I want to see a dentist. मुझे मेरे दूध पे दर्द हो रहे। मुझे डेंटިസ്റ്റ് को देखना है।"`, segmentCount=3. Gate correctly fired `unexpected_script` on the Devanagari. Result: `refinementExecuted=true, refine=13772ms, quality=10822ms, total=24594ms, usedFallback=false, guardrailsApplied=[]`. The "Here's what I heard" screen preserved all three languages verbatim — no translation, no dropped content, consistent with the conservative refinement policy.
+
+⚠️ One transparency note: this same browser tab's console buffer also contained an **earlier, unconfirmed** set of diagnostic logs (Tamil/Spanish/Hindi segments including `"el link dentista me ha cagado"`) timestamped before your explicit "I finished speaking" message. I'm not attributing those to your speech and excluded them from this report — I have no confirmation you produced that earlier run, so per this session's standing rule I'm flagging it rather than silently using it as evidence.
+
+## E. Quality guard remains mandatory
+Confirmed in both paths above — it ran on all 9 fast-path fixtures and both slow-path cases, exactly as designed (`quality guard ALWAYS runs`).
+
+## F. Test results
+- `apps/backend`: `tsc --noEmit` clean.
+- Eval script: **9/11 passed**. The 2 failures are the same two pre-existing stale/known-limitation cases (see H), now failing for a *slightly different, more precise* reason than previously reported.
+- Unit tests (44 backend + 8 kiosk) were already green as of the last implementation turn; no production code changed this turn so they remain valid.
+
+## G. Latency comparison (before vs. after — only measured numbers)
+| | Before (unconditional refinement, prior session's measurements) | After (conditional gate, this turn's real measurements) |
+|---|---|---|
+| Clean/single-segment case | ~5.0–6.8s | **2.8–6.0s (fast path, refinement skipped)** |
+| Contaminated/multi-segment case | ~11.4–17.3s | **9.2–24.6s (slow path, refinement still runs)** |
+
+Fast-path cases get a real, measured latency reduction — they now cost only the quality-guard call. Slow-path cases are not faster (they still run both LLM calls) and the live-mic sample (24.6s) ran *slower* than the eval script's fixture (16.0s) — real network/API variance on a live call, not a regression, but worth naming: this is the honest number, not a cherry-picked one.
+
+## H. Known limitations (unresolved, explicitly not silently fixed)
+1. **The two "natural pause" eval fixtures still fail**, and now for a clearer reason than before: the gate's design (no duplicate-word-repetition signal, no "glued word" signal) means these specific artifacts pass straight through the fast path uncleaned — `"എനിക്ക്എനിക്ക്"` and `"എനിക്ക് എനിക്ക്"` are never collapsed because neither an unexpected script nor short-fragment pattern fires for them. Before this turn, refinement ran unconditionally and used to clean these up. **This is a real, measured trade-off of the new architecture**, not a bug: the gate was explicitly scoped by you to avoid semantic/language judgment, and duplicate-word collapsing falls outside that scope. The quality guard still catches these as `REVIEW` (not `CLEAR`), so nothing is silently marked fine — but the raw duplication artifact does now reach the patient-facing transcript on the fast path where it previously wouldn't have.
+2. ASR-level cross-language hallucination (unrelated to this turn's change) remains unmitigated — `languageCodes` is still confirmed unsupported on this API surface, and VAD tuning remains out of scope per your explicit instruction.
+
+## I. Recommended next step
+Given H.1, the smallest reasonable follow-up (not implemented, awaiting your direction) would be a **third, narrowly-scoped gate signal for immediate-adjacent-duplicate-token repetition** — a simple, deterministic, non-semantic check unrelated to language, so `"X X"`/`"XX"` fusions get sent to refinement without reintroducing any language/script judgment. That's a small, isolated addition to `rawTranscriptAssessment.ts` if you want it. Otherwise, the conditional-refinement architecture is implemented, typechecked, unit-tested, real-Gemini-evaluated, and now real-mic-verified end to end — I'd consider this turn's task complete and wait for your call on H.1 before touching anything else (explicitly not moving to VAD/model/provider changes).

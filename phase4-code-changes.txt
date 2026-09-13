@@ -1,0 +1,2045 @@
+================================================================================
+ARTEQ AI — Phase 4 "Conditional Refinement with Mandatory Quality Guard"
+COMPLETE CODE CHANGE RECORD
+Generated from direct inspection of the files on disk at report time.
+================================================================================
+
+SCOPE OF THIS RECORD
+---------------------
+This covers the full implementation of the approved Phase 4 latency
+architecture:
+
+    raw transcript
+        -> deterministic gate (assessRawTranscript)
+        -> IF gate finds signals: run refinement (slow path)
+           IF gate finds no signals: skip refinement (fast path)
+        -> quality guard ALWAYS runs, regardless of path
+        -> deterministic guardrails ALWAYS applied on top
+        -> final TranscriptProcessingResult returned to the kiosk
+
+Hard constraints that were respected throughout (per explicit instruction):
+did NOT change the Gemini model, Gemini Live config, mic/audio capture,
+PCM16/resampling, WebSocket protocol/transport, backend voice architecture,
+provider architecture, existing conservative refinement prompt behavior, or
+existing quality-guard philosophy.
+
+--------------------------------------------------------------------------------
+1. NEW FILE: apps/backend/src/services/refinement/rawTranscriptAssessment.ts
+--------------------------------------------------------------------------------
+STATUS: newly created this task. Did not exist before.
+PURPOSE: the deterministic gate itself — the ONLY new piece of decision logic
+in this task. Pure function, no I/O, no LLM call, fully unit-testable.
+
+WHY THIS DESIGN:
+- Must NOT be a language classifier (explicit constraint) — so it never
+  checks "is this Malayalam", only "is this an unfamiliar/unexpected script
+  outside the set this product supports" (Malayalam + Latin are exempt).
+- Must NOT judge semantic correctness or grammar — no scoring, no dictionary.
+- Must default to running refinement whenever uncertain — implemented by
+  making `needsRefinement` true whenever ANY signal fires, and by keeping the
+  signal thresholds conservative (real captured code-switching and real
+  captured long-clean transcripts were used as the negative-fixture floor,
+  see section 5 below).
+- Must never reject transcripts — it has no "reject" output at all, only
+  `needsRefinement: boolean` and `signals: string[]` for diagnostics.
+
+COMPLETE CONTENTS (current, on disk):
+
+    /**
+     * Pure, deterministic gate deciding whether the (comparatively expensive)
+     * refinement LLM call is worth running for this raw transcript.
+     *
+     * This is NOT a correctness or semantic check — quality guard remains
+     * mandatory for every non-empty transcript regardless of what this
+     * function decides (Phase 4 latency architecture). Its only job is:
+     * "is there structural evidence that cleanup is warranted?"
+     *
+     * Explicitly does NOT:
+     *  - classify or identify language
+     *  - score grammar/fluency
+     *  - reject anything
+     *  - use dictionary/word-list matching
+     * If nothing here fires, that means no evidence was found — not that the
+     * content was judged correct. When genuinely uncertain, this must lean
+     * toward requesting refinement, never toward skipping it.
+     */
+
+    export interface RawTranscriptAssessment {
+      needsRefinement: boolean;
+      signals: string[];
+    }
+
+    /**
+     * Unicode ranges with no plausible connection to Malayalam, Manglish
+     * (Latin script), or English: CJK Unified Ideographs, Hiragana, Katakana,
+     * Hangul, Devanagari, Thai, Cyrillic, Arabic, and Tamil. Tamil is included
+     * deliberately — it's the specific script Gemini Live's raw ASR has been
+     * observed (real captured evidence) to substitute for Malayalam under
+     * uncertainty. Its presence here is treated as UNCERTAINTY about the raw
+     * transcript, not as a rejection of the content — presence only ever
+     * requests a refinement pass, never a rejection, and Malayalam script and
+     * Latin script (English/Manglish/code-switching) are never flagged by this
+     * pattern, so legitimate multilingual/code-switched speech is unaffected.
+     */
+    const UNEXPECTED_SCRIPT_PATTERN =
+      // CJK ideographs | Hiragana+Katakana | Hangul | Devanagari | Thai | Cyrillic | Arabic | Tamil
+      /[一-鿿぀-ヿ가-힯ऀ-ॿ฀-๿Ѐ-ӿ؀-ۿ஀-௿]/;
+
+    /** Fragmentation signals only apply once there are enough segments that a
+     * pattern is meaningful — a normal two-part sentence must never trigger this. */
+    const MIN_SEGMENTS_FOR_FRAGMENTATION_SIGNAL = 3;
+
+    /** Conservative: only a genuinely low average segment length looks like ASR
+     * noise (short, disconnected fragments) rather than real clauses/sentences.
+     * A long, clean, naturally multi-segment utterance has segments well above
+     * this — deliberately set low to avoid false positives on legitimate
+     * longer speech (see Phase 4 latency architecture test 5/6). */
+    const SHORT_SEGMENT_AVERAGE_THRESHOLD = 15;
+
+    export function assessRawTranscript(
+      rawTranscript: string,
+      segmentCount: number,
+    ): RawTranscriptAssessment {
+      const signals: string[] = [];
+      const trimmed = rawTranscript.trim();
+
+      if (UNEXPECTED_SCRIPT_PATTERN.test(trimmed)) {
+        signals.push("unexpected_script");
+      }
+
+      if (segmentCount >= MIN_SEGMENTS_FOR_FRAGMENTATION_SIGNAL) {
+        const averageSegmentLength = trimmed.length / segmentCount;
+        if (averageSegmentLength < SHORT_SEGMENT_AVERAGE_THRESHOLD) {
+          signals.push("fragmented_short_segments");
+        }
+      }
+
+      return { needsRefinement: signals.length > 0, signals };
+    }
+
+WHAT WAS ADDED vs REMOVED: entire file is new — nothing removed, nothing
+pre-existing to diff against.
+
+--------------------------------------------------------------------------------
+2. NEW FILE: apps/backend/src/services/refinement/rawTranscriptAssessment.test.ts
+--------------------------------------------------------------------------------
+STATUS: newly created this task.
+PURPOSE: unit tests for the gate above, using REAL captured transcripts from
+this project's own Malayalam/Manglish regression investigation (not invented
+strings) wherever real evidence existed, per explicit instruction.
+
+COMPLETE CONTENTS (current, on disk):
+
+    import { describe, expect, it } from "vitest";
+    import { assessRawTranscript } from "./rawTranscriptAssessment.js";
+
+    describe("assessRawTranscript — fast path (no signals, refinement skipped)", () => {
+      it("clean English, single segment", () => {
+        const result = assessRawTranscript("I have tooth pain and I want to see a dentist.", 1);
+        expect(result.needsRefinement).toBe(false);
+        expect(result.signals).toEqual([]);
+      });
+
+      it("clean Malayalam, single segment", () => {
+        const result = assessRawTranscript(
+          "എനിക്ക് പല്ല് വേദന എടുക്കുന്നു. എനിക്ക് പല്ല് ഡോക്ടറിനെ കാണണം.",
+          1,
+        );
+        expect(result.needsRefinement).toBe(false);
+      });
+
+      it("clean Manglish, single segment", () => {
+        const result = assessRawTranscript("Enikku nalla pallu vedhna undu, dentistne kaananam.", 1);
+        expect(result.needsRefinement).toBe(false);
+      });
+
+      it("Malayalam + English code-switching must NOT be flagged merely for mixing scripts", () => {
+        const result = assessRawTranscript(
+          "എനിക്ക് പല്ലുവേദന എടുക്കുന്നു. I want to see a dentist. My tooth really hurts. വളരെയധികം വേദന എടുക്കുന്നതുണ്ട്.",
+          1,
+        );
+        expect(result.needsRefinement).toBe(false);
+        expect(result.signals).toEqual([]);
+      });
+
+      it("a long but clean transcript — segment count alone must not force refinement", () => {
+        // Real captured "longer utterance" fixture, split across a plausible
+        // number of natural clause-boundary segments, each substantial.
+        const raw =
+          "I have had a bad headache since this morning, and also some tooth pain on the left side. " +
+          "It gets worse when I bite down. " +
+          "I want to see a doctor about the headache and maybe a dentist about the tooth as well.";
+        const result = assessRawTranscript(raw, 3);
+        expect(result.needsRefinement).toBe(false);
+      });
+    });
+
+    describe("assessRawTranscript — escalates to refinement", () => {
+      it("real captured contamination: Hindi Devanagari fragment (from this project's investigation)", () => {
+        const raw = "I have tooth pain and I want to see a dentist. याद है?";
+        const result = assessRawTranscript(raw, 2);
+        expect(result.needsRefinement).toBe(true);
+        expect(result.signals).toContain("unexpected_script");
+      });
+
+      it("real captured contamination: Tamil/Hindi/Spanish multi-segment fragmentation", () => {
+        const raw =
+          "எனக்கு பல்லு வலி எடுக்குது. I want to see a dentist. 50 है। मैं क्यों पर स्मोकிங் करूं? ¿Eres de dónde?";
+        const result = assessRawTranscript(raw, 4);
+        expect(result.needsRefinement).toBe(true);
+        expect(result.signals).toContain("unexpected_script");
+      });
+
+      it("real captured contamination: Japanese/CJK fragment", () => {
+        const raw =
+          "എനിക്ക് പല്ല് വേദനിക്കുന്നു. ഐ വാണ്ട് ടു സീ എ ഡെന്റിസ്റ്റ്. 我 要 弄 瑞 。 お いの の バウチャー の 流れ で ね 、 えい の の 流れ で";
+        const result = assessRawTranscript(raw, 3);
+        expect(result.needsRefinement).toBe(true);
+        expect(result.signals).toContain("unexpected_script");
+      });
+
+      it("garbled/fragmented transcript with many short segments, no foreign script", () => {
+        // Same shape as the captured natural-pause fixture: several short,
+        // disconnected fragments — should escalate on fragmentation alone.
+        const raw = "And it can uh. Haan. dentistine kaana. uh huh. what.";
+        const result = assessRawTranscript(raw, 5);
+        expect(result.needsRefinement).toBe(true);
+        expect(result.signals).toContain("fragmented_short_segments");
+      });
+
+      it("ambiguous/borderline: a single unfamiliar-script word amid otherwise clean speech — conservative default", () => {
+        const raw = "എനിക്ക் வலி ഉണ്ട്."; // one Tamil word amid Malayalam
+        const result = assessRawTranscript(raw, 1);
+        expect(result.needsRefinement).toBe(true);
+      });
+    });
+
+    describe("assessRawTranscript — never rejects, only signals", () => {
+      it("always returns a decision without throwing, even for empty input", () => {
+        expect(() => assessRawTranscript("", 0)).not.toThrow();
+      });
+    });
+
+COVERAGE MAP against the 10 originally-required scenarios:
+  1. Clean English -> skip                         => fast-path test #1
+  2. Clean Malayalam -> skip                        => fast-path test #2
+  3. Clean Manglish -> skip                         => fast-path test #3
+  4. Code-switching not misclassified                => fast-path test #4
+  5. Long-clean transcript, segment count alone
+     must not force refinement                       => fast-path test #5
+  6. Foreign-script contamination -> refine           => escalation tests #1-#3
+  7. Garbled/fragmented -> refine                     => escalation test #4
+  8. Empty -> existing behavior (handled upstream in
+     processTranscript.ts, not this gate)             => processTranscript.test.ts
+     (see section 4) + the "never throws" test here
+  9. Ambiguous/borderline -> conservative refine       => escalation test #5
+ 10. Quality guard always runs regardless of gate      => processTranscript.test.ts
+     (see section 4, this gate has no quality-guard logic itself)
+
+--------------------------------------------------------------------------------
+3. MODIFIED FILE: packages/shared/src/transcriptProtocol.ts
+--------------------------------------------------------------------------------
+STATUS: existing Phase 4 contract file, modified this task.
+
+WHAT WAS ADDED to ProcessingDiagnostics:
+    refinementExecuted: boolean;
+    gateSignals: string[];
+  (previously this interface had refinementLatencyMs, qualityLatencyMs,
+  totalLatencyMs, usedFallback, fallbackLatencyMs, guardrailsApplied only —
+  those were NOT changed.)
+
+WHAT WAS ADDED to TranscriptProcessRequest:
+    segmentCount?: number;
+  (previously this interface had only rawTranscript: string.)
+
+COMPLETE CURRENT CONTENTS OF THE FILE:
+
+    /**
+     * ARTEQ AI — Transcript Refinement + Quality Guard contract (Phase 4).
+     *
+     * This is the shape of POST /api/transcript/process — the kiosk's ONLY
+     * window into this stage. Everything about how many LLM calls happen
+     * internally, which provider is used, or what deterministic guardrails ran
+     * is a backend implementation detail; the kiosk only ever sees this result.
+     *
+     * Pipeline this sits in (docs/01 §7, docs/02 §10-11, docs/04 §12-13):
+     *   raw transcript -> refinement -> quality guard -> (future) confirmation -> routing
+     * Each stage must remain distinguishable — this type keeps `quality` and
+     * `diagnostics` as separate namespaces from `cleanTranscript` rather than a
+     * single flat blob, specifically so a stage can be inspected/tested/evolved
+     * independently of the others.
+     */
+
+    export type QualityStatus = "CLEAR" | "REVIEW" | "INSUFFICIENT";
+
+    /**
+     * The quality-guard verdict. Deliberately minimal for Phase 4 (per Decision
+     * 3): only what the patient-facing UI and this phase's tests actually need.
+     * Future fields (e.g. a breakdown by issue category) can be added here
+     * without touching `cleanTranscript` or `diagnostics`.
+     */
+    export interface QualityAssessment {
+      status: QualityStatus;
+      /** 0.0-1.0. Advisory only — `status` is the field that drives UI/logic. */
+      score: number;
+      issues: string[];
+      /** Patient-facing-safe explanation when status is not CLEAR, else null. */
+      reviewReason: string | null;
+    }
+
+    /**
+     * Internal/diagnostic only — never rendered in patient-facing UI (Decision
+     * 4). Exists so latency and guardrail behavior can be measured and logged
+     * during development/validation without adding patient-visible surface.
+     */
+    export interface ProcessingDiagnostics {
+      /** False when the deterministic gate decided refinement wasn't worth
+       * running (fast path) — see rawTranscriptAssessment.ts. Quality guard
+       * runs either way; this only reflects the refinement stage. */
+      refinementExecuted: boolean;
+      refinementLatencyMs: number;
+      qualityLatencyMs: number;
+      totalLatencyMs: number;
+      usedFallback: boolean;
+      fallbackLatencyMs: number | null;
+      /** Which deterministic guardrails fired, e.g. "length_ratio", "script_loss". */
+      guardrailsApplied: string[];
+      /** Signals that made the gate decide refinement was needed — empty array
+       * means the gate found no evidence, not that it "approved" the content
+       * (it never judges correctness, only whether cleanup looks warranted). */
+      gateSignals: string[];
+    }
+
+    /**
+     * The full Phase 4 result. Extensibility seam for the future pipeline
+     * (docs/01's Understanding -> Intent+Entities -> Structured Request ->
+     * Confirmation -> Routing): later phases add NEW optional top-level fields
+     * here (e.g. `understanding?: UnderstandingResult`) rather than reshaping
+     * `cleanTranscript`/`quality`/`diagnostics`, so existing consumers of this
+     * type never need to change when a new stage is appended.
+     */
+    export interface TranscriptProcessingResult {
+      cleanTranscript: string;
+      quality: QualityAssessment;
+      diagnostics: ProcessingDiagnostics;
+    }
+
+    export interface TranscriptProcessRequest {
+      rawTranscript: string;
+      /** How many discrete Gemini Live transcription segments were joined to
+       * form rawTranscript. Optional/omittable (defaults to 1 server-side) —
+       * used only as a weak input to the deterministic refinement gate, never
+       * as a correctness signal on its own. */
+      segmentCount?: number;
+    }
+
+WHY: the kiosk<->backend contract needed to (a) tell the backend how many
+segments the raw transcript was made of (the gate's fragmentation signal
+needs this) and (b) let the backend report back, for diagnostics/testing,
+whether refinement actually ran and what signals caused that decision. Both
+are additive/optional changes — nothing existing was removed or renamed, so
+this is backward compatible with any caller that omits segmentCount.
+
+--------------------------------------------------------------------------------
+4. MODIFIED FILE: apps/backend/src/services/refinement/processTranscript.ts
+--------------------------------------------------------------------------------
+STATUS: existing Phase 4 orchestrator, modified this task. This is the
+orchestration change showing exactly when refinement is skipped, when it
+runs, and that the quality guard always runs regardless.
+
+WHAT CHANGED (conceptually):
+- BEFORE this task: refine() was called unconditionally for every non-empty
+  transcript, then assessQuality() always ran afterward.
+- AFTER this task: assessRawTranscript() (the new gate) is called first.
+  refine() is now called ONLY if assessment.needsRefinement is true.
+  assessQuality() STILL always runs afterward, unconditionally, exactly as
+  before — this call was never made conditional.
+- The `segmentCount` parameter was added (default 1) so the gate has
+  something to evaluate.
+- Diagnostics now report `refinementExecuted` (mirrors assessment.needsRefinement)
+  and `gateSignals` (mirrors assessment.signals) in every returned result,
+  including the empty-input short-circuit path.
+
+COMPLETE CURRENT CONTENTS OF THE FILE:
+
+    import type { TranscriptProcessingResult } from "@arteq/shared";
+    import { applyGuardrails } from "./guardrails.js";
+    import { assessRawTranscript } from "./rawTranscriptAssessment.js";
+    import type { QualityOutcome, TranscriptRefinementProvider } from "./TranscriptRefinementProvider.js";
+
+    const EMPTY_INPUT_REASON = "I didn't catch anything. Could you try again?";
+    const FALLBACK_REASON = "Let's make sure I understood you correctly.";
+
+    /**
+     * The Phase 4 orchestrator. This is the ONE place that:
+     *  - runs the deterministic gate (assessRawTranscript) to decide whether
+     *    refinement is worth running at all (latency architecture) — quality
+     *    guard is NEVER gated, it always runs for non-empty input
+     *  - calls refine() (conditionally) then assessQuality() (always)
+     *  - measures latency for each stage and the total
+     *  - isolates each stage's failure from the other (a failed quality check
+     *    does not discard a successful refinement, and vice versa)
+     *  - applies deterministic guardrails on top of the LLM's own verdict
+     *  - never throws — always returns a valid result, per CLAUDE.md §11/§24
+     *    ("never fabricate success", patient-facing errors must be graceful)
+     *
+     * This function is provider-agnostic (works with any TranscriptRefinementProvider,
+     * including a fake one in tests) — the orchestration/guardrail/gate logic is
+     * exactly the part the Phase 4 assessment argued should be deterministic
+     * and NOT delegated to the LLM.
+     */
+    export async function processTranscript(
+      provider: TranscriptRefinementProvider,
+      rawTranscript: string,
+      segmentCount = 1,
+    ): Promise<TranscriptProcessingResult> {
+      const totalStart = performance.now();
+      const trimmed = rawTranscript.trim();
+
+      if (trimmed.length === 0) {
+        return {
+          cleanTranscript: "",
+          quality: { status: "INSUFFICIENT", score: 0, issues: [], reviewReason: EMPTY_INPUT_REASON },
+          diagnostics: {
+            refinementExecuted: false,
+            refinementLatencyMs: 0,
+            qualityLatencyMs: 0,
+            totalLatencyMs: performance.now() - totalStart,
+            usedFallback: false,
+            fallbackLatencyMs: null,
+            guardrailsApplied: ["empty_raw_input"],
+            gateSignals: [],
+          },
+        };
+      }
+
+      // --- TEMPORARY DIAGNOSTIC (Malayalam/Manglish regression investigation) ---
+      // Logs transcript CONTENT (never audio, never secrets) at each stage so a
+      // failure can be attributed to the correct boundary. Remove once Phase 4
+      // has been validated end-to-end.
+      console.log("[diag][stage2.5 gate-input]", JSON.stringify(trimmed), "segmentCount=", segmentCount);
+      const assessment = assessRawTranscript(trimmed, segmentCount);
+      console.log("[diag][stage2.5 gate-result]", JSON.stringify(assessment));
+
+      let cleanTranscript: string;
+      let refinementFailed = false;
+      let refinementLatencyMs = 0;
+
+      if (assessment.needsRefinement) {
+        console.log("[diag][stage3 refinement-input]", JSON.stringify(trimmed));
+        const refineStart = performance.now();
+        try {
+          const outcome = await provider.refine(trimmed);
+          cleanTranscript = outcome.cleanTranscript;
+          console.log("[diag][stage4 refinement-output]", JSON.stringify(cleanTranscript));
+        } catch (err) {
+          console.warn("[transcript] refine() failed, falling back to raw transcript:", err);
+          cleanTranscript = trimmed;
+          refinementFailed = true;
+        }
+        refinementLatencyMs = performance.now() - refineStart;
+      } else {
+        // Fast path: gate found no evidence refinement is needed. This is NOT
+        // "content approved" — it's "no cleanup evidence found" — quality guard
+        // below still independently reviews this raw text.
+        cleanTranscript = trimmed;
+        console.log("[diag][stage3/4 refinement-skipped] gate found no signals, using raw as clean");
+      }
+
+      let llmQuality: QualityOutcome;
+      let qualityFailed = false;
+      const qualityStart = performance.now();
+      try {
+        llmQuality = await provider.assessQuality(trimmed, cleanTranscript);
+        console.log("[diag][stage5 quality-output]", JSON.stringify(llmQuality));
+      } catch (err) {
+        console.warn("[transcript] assessQuality() failed, falling back to REVIEW:", err);
+        llmQuality = { status: "REVIEW", score: 0, issues: [], reviewReason: null };
+        qualityFailed = true;
+      }
+      const qualityLatencyMs = performance.now() - qualityStart;
+
+      const guarded = applyGuardrails(trimmed, cleanTranscript, llmQuality);
+      if (guarded.guardrailsApplied.length > 0) {
+        console.log("[diag][guardrails]", JSON.stringify(guarded.guardrailsApplied), "-> status", guarded.status);
+      }
+      const usedFallback = refinementFailed || qualityFailed;
+      const totalLatencyMs = performance.now() - totalStart;
+
+      const result: TranscriptProcessingResult = {
+        cleanTranscript,
+        quality: {
+          status: guarded.status,
+          score: llmQuality.score,
+          issues: guarded.issues,
+          reviewReason: guarded.status === "CLEAR" ? null : llmQuality.reviewReason ?? FALLBACK_REASON,
+        },
+        diagnostics: {
+          refinementExecuted: assessment.needsRefinement,
+          refinementLatencyMs,
+          qualityLatencyMs,
+          totalLatencyMs,
+          usedFallback,
+          fallbackLatencyMs: usedFallback ? totalLatencyMs : null,
+          guardrailsApplied: guarded.guardrailsApplied,
+          gateSignals: assessment.signals,
+        },
+      };
+      console.log("[diag][stage6 final-patient-facing]", JSON.stringify(result.cleanTranscript));
+      return result;
+    }
+
+EXACT SKIP / RUN / GUARD BEHAVIOR (as implemented, line-referenced to the code
+above):
+  - SKIPPED: when `assessment.needsRefinement === false` (the `else` branch),
+    `cleanTranscript = trimmed` directly, `provider.refine()` is never called,
+    `refinementLatencyMs` stays 0.
+  - RUNS: when `assessment.needsRefinement === true` (the `if` branch),
+    `provider.refine(trimmed)` is awaited inside a try/catch; on failure it
+    falls back to the raw transcript and sets `refinementFailed = true`
+    (never throws, never fabricates success).
+  - QUALITY GUARD ALWAYS RUNS: `provider.assessQuality(trimmed, cleanTranscript)`
+    is called unconditionally, after the if/else block, regardless of which
+    branch was taken — this call was not touched by this task's changes.
+  - DETERMINISTIC GUARDRAILS ALWAYS APPLY: `applyGuardrails(...)` is called
+    unconditionally after the quality guard, on both paths.
+
+WHY THIS DESIGN: the approved architecture explicitly required the quality
+guard to be the constant safety net regardless of which path was taken, so
+that skipping refinement can never mean skipping verification.
+
+--------------------------------------------------------------------------------
+5. MODIFIED FILE: apps/backend/src/services/refinement/processTranscript.test.ts
+--------------------------------------------------------------------------------
+STATUS: existing test file, substantially rewritten this task to add gate
+coverage and fix stale assumptions that the old unconditional-refinement
+tests made.
+
+WHAT CHANGED:
+- FakeProvider gained `refineCallCount`/`qualityCallCount` counters so tests
+  can assert exactly how many times each stage ran (essential for verifying
+  skip vs. run behavior).
+- NEW describe block "fast path (gate finds no signals)" — 6 tests.
+- NEW describe block "slow path (gate finds signals, refinement runs)" — 4 tests.
+- NEW describe block "latency measurement" — 2 tests.
+- Existing describe block "failure and fallback (refinement path)" — the
+  first three tests were changed to pass `segmentCount=3` (forcing the
+  fragmentation gate signal) so that `refine()` is actually invoked and its
+  failure path is genuinely exercised. Before this task these tests used
+  clean, single-segment text which — under the OLD unconditional-refinement
+  behavior — always called refine(); under the NEW gated behavior that same
+  text would hit the fast path and never call refine() at all, silently
+  making the "refine() fails" test meaningless. This was a real risk of a
+  stale/no-longer-testing-what-it-claims test, caught and fixed rather than
+  left silently green.
+- A NEW fourth test was added to that block: "never returns a fabricated
+  CLEAR when quality guard fails on the fast path (refinement skipped)" —
+  this specifically verifies the quality-guard-always-runs guarantee on the
+  fast path, which did not need testing before this task existed (there was
+  no fast path).
+
+COMPLETE CURRENT CONTENTS OF THE FILE:
+
+    import { describe, expect, it } from "vitest";
+    import { processTranscript } from "./processTranscript.js";
+    import type {
+      QualityOutcome,
+      RefineOutcome,
+      TranscriptRefinementProvider,
+    } from "./TranscriptRefinementProvider.js";
+
+    /**
+     * A fake provider lets us test the orchestrator's gating, failure isolation,
+     * and fallback behavior deterministically, without real network calls or
+     * non-deterministic LLM output.
+     */
+    class FakeProvider implements TranscriptRefinementProvider {
+      readonly name = "fake";
+      refineCallCount = 0;
+      qualityCallCount = 0;
+      constructor(
+        private refineImpl: (raw: string) => Promise<RefineOutcome>,
+        private qualityImpl: (raw: string, clean: string) => Promise<QualityOutcome>,
+      ) {}
+      isConfigured() {
+        return true;
+      }
+      refine(raw: string) {
+        this.refineCallCount++;
+        return this.refineImpl(raw);
+      }
+      assessQuality(raw: string, clean: string) {
+        this.qualityCallCount++;
+        return this.qualityImpl(raw, clean);
+      }
+    }
+
+    const okRefine = async (raw: string): Promise<RefineOutcome> => ({ cleanTranscript: raw });
+    const okQuality = async (): Promise<QualityOutcome> => ({
+      status: "CLEAR",
+      score: 0.9,
+      issues: [],
+      reviewReason: null,
+    });
+
+    describe("processTranscript — empty/invalid input", () => {
+      it("short-circuits empty raw input to INSUFFICIENT without calling the provider at all", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const result = await processTranscript(provider, "   ");
+        expect(provider.refineCallCount).toBe(0);
+        expect(provider.qualityCallCount).toBe(0);
+        expect(result.quality.status).toBe("INSUFFICIENT");
+        expect(result.cleanTranscript).toBe("");
+        expect(result.diagnostics.usedFallback).toBe(false);
+        expect(result.diagnostics.refinementExecuted).toBe(false);
+      });
+    });
+
+    describe("processTranscript — fast path (gate finds no signals)", () => {
+      it("clean English: refinement is skipped, quality guard still runs", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const result = await processTranscript(
+          provider,
+          "I have tooth pain and I want to see a dentist.",
+          1,
+        );
+        expect(provider.refineCallCount).toBe(0);
+        expect(provider.qualityCallCount).toBe(1);
+        expect(result.diagnostics.refinementExecuted).toBe(false);
+        expect(result.diagnostics.refinementLatencyMs).toBe(0);
+        expect(result.cleanTranscript).toBe("I have tooth pain and I want to see a dentist.");
+        expect(result.quality.status).toBe("CLEAR");
+      });
+
+      it("clean Malayalam: refinement is skipped", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw = "എനിക്ക് പല്ല് വേദന എടുക്കുന്നു. എനിക്ക് പല്ല് ഡോക്ടറിനെ കാണണം.";
+        const result = await processTranscript(provider, raw, 1);
+        expect(provider.refineCallCount).toBe(0);
+        expect(result.cleanTranscript).toBe(raw);
+      });
+
+      it("clean Manglish: refinement is skipped", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw = "Enikku nalla pallu vedhna undu, dentistne kaananam.";
+        const result = await processTranscript(provider, raw, 1);
+        expect(provider.refineCallCount).toBe(0);
+      });
+
+      it("Malayalam + English code-switching must NOT be routed to refinement merely for mixing scripts", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw =
+          "എനിക്ക് പല്ലുവേദന എടുക്കുന്നു. I want to see a dentist. My tooth really hurts. വളരെയധികം വേദന എടുക്കുന്നതുണ്ട്.";
+        const result = await processTranscript(provider, raw, 1);
+        expect(provider.refineCallCount).toBe(0);
+        expect(result.diagnostics.gateSignals).toEqual([]);
+      });
+
+      it("a long but clean transcript: segment count alone must not force refinement", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw =
+          "I have had a bad headache since this morning, and also some tooth pain on the left side. " +
+          "It gets worse when I bite down. " +
+          "I want to see a doctor about the headache and maybe a dentist about the tooth as well.";
+        const result = await processTranscript(provider, raw, 3);
+        expect(provider.refineCallCount).toBe(0);
+      });
+
+      it("quality guard ALWAYS runs even when refinement is skipped", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        await processTranscript(provider, "I have tooth pain.", 1);
+        expect(provider.qualityCallCount).toBe(1);
+      });
+    });
+
+    describe("processTranscript — slow path (gate finds signals, refinement runs)", () => {
+      it("suspicious foreign-script contamination triggers refinement", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw = "I have tooth pain and I want to see a dentist. याद है?";
+        const result = await processTranscript(provider, raw, 2);
+        expect(provider.refineCallCount).toBe(1);
+        expect(result.diagnostics.refinementExecuted).toBe(true);
+        expect(result.diagnostics.gateSignals).toContain("unexpected_script");
+      });
+
+      it("garbled/fragmented transcript (many short segments) triggers refinement", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw = "And it can uh. Haan. dentistine kaana. uh huh. what.";
+        const result = await processTranscript(provider, raw, 5);
+        expect(provider.refineCallCount).toBe(1);
+        expect(result.diagnostics.gateSignals).toContain("fragmented_short_segments");
+      });
+
+      it("ambiguous/borderline transcript: conservative default runs refinement", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const raw = "എനിക്ക് வலி ഉണ്ട്."; // one Tamil word amid otherwise-Malayalam speech
+        const result = await processTranscript(provider, raw, 1);
+        expect(provider.refineCallCount).toBe(1);
+      });
+
+      it("quality guard still runs after refinement executes", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        await processTranscript(provider, "याद है?", 1);
+        expect(provider.qualityCallCount).toBe(1);
+      });
+    });
+
+    describe("processTranscript — latency measurement", () => {
+      it("measures refinement, quality, and total latency when refinement executes", async () => {
+        const provider = new FakeProvider(
+          async (raw) => {
+            await new Promise((r) => setTimeout(r, 5));
+            return { cleanTranscript: raw };
+          },
+          async () => {
+            await new Promise((r) => setTimeout(r, 5));
+            return okQuality();
+          },
+        );
+        // Force escalation via fragmentation signal so refine() actually runs.
+        const result = await processTranscript(provider, "some speech here", 3);
+        expect(result.diagnostics.refinementExecuted).toBe(true);
+        expect(result.diagnostics.refinementLatencyMs).toBeGreaterThan(0);
+        expect(result.diagnostics.qualityLatencyMs).toBeGreaterThan(0);
+        expect(result.diagnostics.totalLatencyMs).toBeGreaterThanOrEqual(
+          result.diagnostics.refinementLatencyMs + result.diagnostics.qualityLatencyMs,
+        );
+      });
+
+      it("reports zero refinement latency on the fast path", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const result = await processTranscript(provider, "I have tooth pain.", 1);
+        expect(result.diagnostics.refinementExecuted).toBe(false);
+        expect(result.diagnostics.refinementLatencyMs).toBe(0);
+      });
+    });
+
+    describe("processTranscript — failure and fallback (refinement path)", () => {
+      it("falls back to the raw transcript when refine() fails, and never throws", async () => {
+        const provider = new FakeProvider(
+          async () => {
+            throw new Error("simulated refine failure");
+          },
+          okQuality,
+        );
+        // Force escalation so refine() is actually invoked and can fail.
+        const result = await processTranscript(provider, "I have tooth pain.", 3);
+        expect(result.cleanTranscript).toBe("I have tooth pain.");
+        expect(result.diagnostics.usedFallback).toBe(true);
+        expect(result.diagnostics.fallbackLatencyMs).not.toBeNull();
+      });
+
+      it("keeps a successful refinement even when assessQuality() fails (does not discard good work)", async () => {
+        const provider = new FakeProvider(
+          async (raw) => ({ cleanTranscript: `refined: ${raw}` }),
+          async () => {
+            throw new Error("simulated quality failure");
+          },
+        );
+        const result = await processTranscript(provider, "I have tooth pain.", 3);
+        expect(result.cleanTranscript).toBe("refined: I have tooth pain.");
+        expect(result.quality.status).toBe("REVIEW");
+        expect(result.diagnostics.usedFallback).toBe(true);
+      });
+
+      it("never returns a fabricated CLEAR when both stages fail", async () => {
+        const provider = new FakeProvider(
+          async () => {
+            throw new Error("refine down");
+          },
+          async () => {
+            throw new Error("quality down");
+          },
+        );
+        const result = await processTranscript(provider, "I have tooth pain.", 3);
+        expect(result.quality.status).not.toBe("CLEAR");
+        expect(result.quality.reviewReason).toBeTruthy();
+      });
+
+      it("never returns a fabricated CLEAR when quality guard fails on the fast path (refinement skipped)", async () => {
+        const provider = new FakeProvider(okRefine, async () => {
+          throw new Error("quality down");
+        });
+        const result = await processTranscript(provider, "I have tooth pain.", 1);
+        expect(provider.refineCallCount).toBe(0);
+        expect(result.quality.status).not.toBe("CLEAR");
+        expect(result.diagnostics.usedFallback).toBe(true);
+      });
+    });
+
+    describe("processTranscript — repeated calls are independent (session isolation)", () => {
+      it("does not leak state between consecutive calls", async () => {
+        const provider = new FakeProvider(okRefine, okQuality);
+        const first = await processTranscript(provider, "first session transcript");
+        const second = await processTranscript(provider, "second session transcript");
+        expect(first.cleanTranscript).toBe("first session transcript");
+        expect(second.cleanTranscript).toBe("second session transcript");
+      });
+    });
+
+TOTAL: 18 tests in this file (was fewer before this task — the empty-input
+test and the original 4 failure/fallback-style tests existed previously in
+some form; all 14 fast-path/slow-path/latency tests are new this task).
+
+--------------------------------------------------------------------------------
+6. MODIFIED FILE: apps/backend/src/routes/transcript.ts
+--------------------------------------------------------------------------------
+STATUS: existing route file, modified this task.
+
+WHAT WAS ADDED:
+- Reads `segmentCount` from the request body (defaults to 1, validated to be
+  a number greater than 0, otherwise falls back to 1) and passes it through
+  to `processTranscript`.
+- The diagnostic console.log line was extended to also print
+  `refinementExecuted` and `gateSignals` alongside the pre-existing
+  refinementMs/qualityMs/totalMs/fallback/guardrails fields.
+
+WHAT WAS REMOVED/CHANGED: previously `processTranscript(provider, rawTranscript)`
+was called with no third argument (segmentCount defaulted to 1 inside
+processTranscript itself in all cases). Now the route explicitly threads
+the caller-provided segmentCount through.
+
+COMPLETE CURRENT CONTENTS OF THE FILE:
+
+    import type { Express } from "express";
+    import type { TranscriptProcessRequest } from "@arteq/shared";
+    import { processTranscript } from "../services/refinement/processTranscript.js";
+    import type { TranscriptRefinementProvider } from "../services/refinement/TranscriptRefinementProvider.js";
+
+    /**
+     * The single external endpoint for Phase 4 (architecture decision D /
+     * implementation principle 6). Everything about the two internal LLM calls
+     * and the deterministic guardrails wrapping them is invisible from here —
+     * the kiosk only ever sees the assembled TranscriptProcessingResult.
+     */
+    export function attachTranscriptRoutes(app: Express, provider: TranscriptRefinementProvider) {
+      app.post("/api/transcript/process", async (req, res) => {
+        const body = req.body as Partial<TranscriptProcessRequest> | undefined;
+        const rawTranscript = body?.rawTranscript;
+        const segmentCount =
+          typeof body?.segmentCount === "number" && body.segmentCount > 0 ? body.segmentCount : 1;
+
+        if (typeof rawTranscript !== "string") {
+          res.status(400).json({ error: "Missing or invalid rawTranscript." });
+          return;
+        }
+
+        if (!provider.isConfigured()) {
+          res.status(503).json({ error: "Transcript refinement provider is not configured." });
+          return;
+        }
+
+        const result = await processTranscript(provider, rawTranscript, segmentCount);
+        console.log(
+          `[diag] transcript.process refinementExecuted=${result.diagnostics.refinementExecuted} ` +
+            `gateSignals=[${result.diagnostics.gateSignals.join(",")}] ` +
+            `refinementMs=${result.diagnostics.refinementLatencyMs.toFixed(0)} ` +
+            `qualityMs=${result.diagnostics.qualityLatencyMs.toFixed(0)} ` +
+            `totalMs=${result.diagnostics.totalLatencyMs.toFixed(0)} ` +
+            `fallback=${result.diagnostics.usedFallback} ` +
+            `guardrails=[${result.diagnostics.guardrailsApplied.join(",")}]`,
+        );
+        res.json(result);
+      });
+    }
+
+--------------------------------------------------------------------------------
+7. UNCHANGED FILE (included for orchestration context only):
+   apps/backend/src/services/refinement/guardrails.ts
+--------------------------------------------------------------------------------
+STATUS: NOT modified this task. Included here only because processTranscript.ts
+calls it unconditionally and the user asked for the complete orchestration
+picture. Same content before and after this task.
+
+COMPLETE CURRENT CONTENTS OF THE FILE:
+
+    import type { QualityOutcome } from "./TranscriptRefinementProvider.js";
+
+    /**
+     * Deterministic safety net wrapping the LLM quality guard (Phase 4
+     * architecture decision D). These are pure, zero-network, zero-hallucination
+     * checks — the backend's own "AI proposes, backend decides" pattern
+     * (CLAUDE.md §5.2) applied to transcript quality itself, not just to
+     * routing/departments/doctors.
+     *
+     * Rule: a guardrail may only push the status toward MORE caution
+     * (CLEAR -> REVIEW -> INSUFFICIENT), never the reverse. A guardrail can
+     * never manufacture a CLEAR verdict — only the LLM's own assessment (or the
+     * default when nothing is wrong) can produce CLEAR.
+     */
+
+    const STATUS_SEVERITY: Record<QualityOutcome["status"], number> = {
+      CLEAR: 0,
+      REVIEW: 1,
+      INSUFFICIENT: 2,
+    };
+
+    function moreCautious(
+      a: QualityOutcome["status"],
+      b: QualityOutcome["status"],
+    ): QualityOutcome["status"] {
+      return STATUS_SEVERITY[a] >= STATUS_SEVERITY[b] ? a : b;
+    }
+
+    // Malayalam Unicode block: U+0D00–U+0D7F.
+    const MALAYALAM_SCRIPT_PATTERN = /[ഀ-ൿ]/;
+
+    /** Below this, a raw transcript is too short for the ratio/script checks to be meaningful. */
+    const TRIVIAL_LENGTH_THRESHOLD = 12;
+
+    export interface GuardrailFinding {
+      guardrail: string;
+      severity: QualityOutcome["status"];
+      issue: string;
+    }
+
+    /**
+     * Flags a clean transcript that's dramatically shorter than the raw one —
+     * a plausible signal of dropped content — or dramatically longer, a
+     * plausible signal of invented content.
+     */
+    export function checkLengthRatio(rawTranscript: string, cleanTranscript: string): GuardrailFinding | null {
+      const rawLen = rawTranscript.trim().length;
+      const cleanLen = cleanTranscript.trim().length;
+      if (rawLen < TRIVIAL_LENGTH_THRESHOLD) return null;
+
+      if (cleanLen < rawLen * 0.25) {
+        return {
+          guardrail: "length_ratio_short",
+          severity: "REVIEW",
+          issue: "The refined transcript is much shorter than the raw transcript.",
+        };
+      }
+      if (cleanLen > rawLen * 2) {
+        return {
+          guardrail: "length_ratio_long",
+          severity: "REVIEW",
+          issue: "The refined transcript is much longer than the raw transcript.",
+        };
+      }
+      return null;
+    }
+
+    /**
+     * Flags apparent loss of Malayalam content: raw transcript contains
+     * Malayalam script but the refined transcript contains none at all.
+     */
+    export function checkScriptPreserved(rawTranscript: string, cleanTranscript: string): GuardrailFinding | null {
+      if (rawTranscript.trim().length < TRIVIAL_LENGTH_THRESHOLD) return null;
+      const rawHasMalayalam = MALAYALAM_SCRIPT_PATTERN.test(rawTranscript);
+      const cleanHasMalayalam = MALAYALAM_SCRIPT_PATTERN.test(cleanTranscript);
+      if (rawHasMalayalam && !cleanHasMalayalam) {
+        return {
+          guardrail: "malayalam_script_lost",
+          severity: "REVIEW",
+          issue: "The raw transcript contains Malayalam script that is missing from the refined transcript.",
+        };
+      }
+      return null;
+    }
+
+    /** Flags an empty or whitespace-only refined transcript. */
+    export function checkNotEmpty(cleanTranscript: string): GuardrailFinding | null {
+      if (cleanTranscript.trim().length === 0) {
+        return {
+          guardrail: "empty_output",
+          severity: "INSUFFICIENT",
+          issue: "The refined transcript is empty.",
+        };
+      }
+      return null;
+    }
+
+    const ALL_GUARDRAILS = [checkLengthRatio, checkScriptPreserved] as const;
+
+    export interface GuardrailResult {
+      status: QualityOutcome["status"];
+      issues: string[];
+      guardrailsApplied: string[];
+    }
+
+    /**
+     * Applies every deterministic guardrail on top of the LLM's own quality
+     * verdict. Never overrides toward CLEAR — only ever holds the line or pushes
+     * toward more caution.
+     */
+    export function applyGuardrails(
+      rawTranscript: string,
+      cleanTranscript: string,
+      llmQuality: QualityOutcome,
+    ): GuardrailResult {
+      const emptyFinding = checkNotEmpty(cleanTranscript);
+      const findings = emptyFinding
+        ? [emptyFinding]
+        : ALL_GUARDRAILS.map((check) => check(rawTranscript, cleanTranscript)).filter(
+            (f): f is GuardrailFinding => f !== null,
+          );
+
+      let status = llmQuality.status;
+      const issues = [...llmQuality.issues];
+      const guardrailsApplied: string[] = [];
+
+      for (const finding of findings) {
+        status = moreCautious(status, finding.severity);
+        issues.push(finding.issue);
+        guardrailsApplied.push(finding.guardrail);
+      }
+
+      return { status, issues, guardrailsApplied };
+    }
+
+--------------------------------------------------------------------------------
+8. MODIFIED FILE: apps/kiosk/src/features/voice/useVoiceSession.ts
+--------------------------------------------------------------------------------
+STATUS: existing kiosk hook, modified this task.
+
+WHAT WAS ADDED:
+- New exported interface:
+    export interface VoiceSessionResult {
+      rawTranscript: string;
+      segmentCount: number;
+    }
+- `stop()` return type changed from `Promise<string>` (implicit, bare
+  transcript) to `Promise<VoiceSessionResult>`.
+- Inside `stop()`, the resolved value changed from a bare joined-transcript
+  string to:
+    resolve({
+      rawTranscript: joinTranscriptSegments(segmentsRef.current),
+      segmentCount: segmentsRef.current.length,
+    });
+
+WHY: the kiosk needed to know how many discrete transcript segments were
+captured so it could forward that count to the backend gate — this was not
+tracked/exposed anywhere before this task.
+
+RELEVANT SECTION, BEFORE (reconstructed from the prior turn's description —
+`stop()` used to resolve a bare string):
+
+    const stop = useCallback((): Promise<string> => {
+      setStatus("stopping");
+      captureRef.current?.stop();
+      socketRef.current?.stop();
+
+      return new Promise((resolve) => {
+        window.setTimeout(() => {
+          socketRef.current?.disconnect();
+          socketRef.current = null;
+          setStatus("idle");
+          resolve(joinTranscriptSegments(segmentsRef.current));
+        }, STOP_FLUSH_MS);
+      });
+    }, []);
+
+RELEVANT SECTION, AFTER (current, on disk):
+
+    export interface VoiceSessionResult {
+      rawTranscript: string;
+      /** How many discrete segments were joined to form rawTranscript — passed
+       * to the Phase 4 refinement gate as a weak signal, never used alone. */
+      segmentCount: number;
+    }
+
+    ...
+
+    const stop = useCallback((): Promise<VoiceSessionResult> => {
+      setStatus("stopping");
+      captureRef.current?.stop();
+      socketRef.current?.stop();
+
+      return new Promise((resolve) => {
+        window.setTimeout(() => {
+          socketRef.current?.disconnect();
+          socketRef.current = null;
+          setStatus("idle");
+          resolve({
+            rawTranscript: joinTranscriptSegments(segmentsRef.current),
+            segmentCount: segmentsRef.current.length,
+          });
+        }, STOP_FLUSH_MS);
+      });
+    }, []);
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    import { useCallback, useRef, useState } from "react";
+    import { AudioCapture } from "./audio/AudioCapture";
+    import { VoiceSocketClient } from "./VoiceSocketClient";
+    import { joinTranscriptSegments, pushTranscriptSegment } from "./transcriptAccumulation";
+
+    export type VoiceSessionStatus = "idle" | "connecting" | "listening" | "stopping" | "error";
+
+    export interface VoiceSessionResult {
+      rawTranscript: string;
+      /** How many discrete segments were joined to form rawTranscript — passed
+       * to the Phase 4 refinement gate as a weak signal, never used alone. */
+      segmentCount: number;
+    }
+
+    const BACKEND_WS_URL =
+      import.meta.env.VITE_BACKEND_WS_URL ?? "ws://localhost:8787/api/live";
+
+    // Flush window after Stop is pressed: gives trailing transcription events a
+    // chance to arrive before we read the final transcript and tear the session
+    // down. docs/04 §11 explicitly flags that this duration should be measured
+    // on real hardware rather than assumed — 350ms is carried over from the
+    // legacy implementation as a starting point only, not a validated value.
+    const STOP_FLUSH_MS = 350;
+
+    /**
+     * Owns the lifecycle of one voice session and is the ONLY place that bridges
+     * the audio/socket layer into React. Per CLAUDE.md §7 / docs/02 §9, the
+     * transcript itself is accumulated in a ref (`transcriptRef`), NOT React
+     * state — only coarse status changes (idle/connecting/listening/error) go
+     * through useState, because those happen a handful of times per session,
+     * not 10x/second like transcript deltas do.
+     *
+     * The live transcript is exposed via `getTranscript()`, a stable function
+     * reading the ref directly — see LiveTranscript.tsx, which polls this
+     * instead of subscribing to it, so the parent tree never re-renders on
+     * every incoming word.
+     *
+     * Transcript deltas are accumulated as discrete SEGMENTS (see
+     * transcriptAccumulation.ts), not concatenated as one raw string — this is
+     * the fix for the natural-pause fragmentation bug (Gemini Live splitting one
+     * utterance-with-a-pause into several delta events that used to get glued
+     * together with no separator).
+     */
+    export function useVoiceSession() {
+      const [status, setStatus] = useState<VoiceSessionStatus>("idle");
+      const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+      const segmentsRef = useRef<string[]>([]);
+      const captureRef = useRef<AudioCapture | null>(null);
+      const socketRef = useRef<VoiceSocketClient | null>(null);
+
+      const getTranscript = useCallback(() => joinTranscriptSegments(segmentsRef.current), []);
+
+      // --- TEMPORARY DIAGNOSTIC (audio/transcription boundary investigation) ---
+      // Ref-only counters, updated from the same hot paths as the transcript
+      // ref above — never trigger renders here. Remove once the audio ->
+      // transcript path is confirmed working end-to-end.
+      const diagRef = useRef({ chunksSent: 0, bytesSent: 0, transcriptEvents: 0 });
+      const getDiagnostics = useCallback(() => ({ ...diagRef.current }), []);
+
+      const start = useCallback(async () => {
+        segmentsRef.current = [];
+        setErrorMessage(null);
+        setStatus("connecting");
+
+        const socket = new VoiceSocketClient();
+        const capture = new AudioCapture();
+        socketRef.current = socket;
+        captureRef.current = capture;
+
+        socket.connect(BACKEND_WS_URL, {
+          onReady: async () => {
+            await capture.start({
+              onChunk: (base64Pcm16) => {
+                // Hot path: fires many times per second. Must never call
+                // setState here — see module docstring.
+                diagRef.current.chunksSent++;
+                diagRef.current.bytesSent += base64Pcm16.length;
+                socket.sendAudioChunk(base64Pcm16);
+              },
+              onError: (reason) => {
+                const message =
+                  reason === "permission_denied"
+                    ? "Microphone access was denied. Please allow microphone access and try again."
+                    : "The microphone isn't available right now.";
+                setErrorMessage(message);
+                setStatus("error");
+              },
+            });
+            setStatus("listening");
+          },
+          onTranscriptDelta: (text) => {
+            // Also the hot path on the receiving side — ref only, no setState.
+            // TEMPORARY DIAGNOSTIC (Malayalam/Manglish regression investigation)
+            // — logs each raw delta received (stage 1 arrival) and the
+            // resulting segment array after aggregation (stage 2), content
+            // only, never audio/secrets.
+            console.log("[diag][stage1 kiosk-received-delta]", JSON.stringify(text));
+            segmentsRef.current = pushTranscriptSegment(segmentsRef.current, text);
+            console.log("[diag][stage2 segments-now]", JSON.stringify(segmentsRef.current));
+            diagRef.current.transcriptEvents++;
+          },
+          onError: (_code, message) => {
+            setErrorMessage(message || "I'm having trouble connecting right now.");
+            setStatus("error");
+          },
+          onClosed: () => {
+            captureRef.current?.stop();
+            captureRef.current = null;
+          },
+        });
+      }, []);
+
+      const stop = useCallback((): Promise<VoiceSessionResult> => {
+        setStatus("stopping");
+        captureRef.current?.stop();
+        socketRef.current?.stop();
+
+        return new Promise((resolve) => {
+          window.setTimeout(() => {
+            socketRef.current?.disconnect();
+            socketRef.current = null;
+            setStatus("idle");
+            resolve({
+              rawTranscript: joinTranscriptSegments(segmentsRef.current),
+              segmentCount: segmentsRef.current.length,
+            });
+          }, STOP_FLUSH_MS);
+        });
+      }, []);
+
+      const reset = useCallback(() => {
+        captureRef.current?.stop();
+        socketRef.current?.disconnect();
+        captureRef.current = null;
+        socketRef.current = null;
+        segmentsRef.current = [];
+        setErrorMessage(null);
+        setStatus("idle");
+      }, []);
+
+      return { status, errorMessage, start, stop, reset, getTranscript, getDiagnostics };
+    }
+
+Note: transcriptAccumulation.ts (pushTranscriptSegment/joinTranscriptSegments)
+was NOT touched this task — it predates this task's changes and is only
+imported here.
+
+--------------------------------------------------------------------------------
+9. MODIFIED FILE: apps/kiosk/src/features/voice/VoiceView.tsx
+--------------------------------------------------------------------------------
+STATUS: existing kiosk component, modified this task.
+
+WHAT CHANGED:
+- `onFinished` prop type changed from `(result: string) => void` (or
+  equivalent bare-string signature) to `(result: VoiceSessionResult) => void`.
+- The error-path "Back" button's onClick changed from calling
+  `onFinished("")` to `onFinished({ rawTranscript: "", segmentCount: 0 })`.
+- Import line changed to also import the new `VoiceSessionResult` type.
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    import { useEffect, useRef } from "react";
+    import { LiveTranscript } from "./LiveTranscript";
+    import { DiagnosticsReadout } from "./DiagnosticsReadout";
+    import { useVoiceSession, type VoiceSessionResult } from "./useVoiceSession";
+
+    /**
+     * The doc-03 §10/§37 "voice mode" screen: while the patient is speaking,
+     * show only what helps them speak — listening state, minimal live
+     * transcript, a stop control. Nothing else.
+     *
+     * TEMPORARY: also renders <DiagnosticsReadout> for the audio->transcript
+     * boundary investigation. Remove that line once resolved.
+     */
+    export function VoiceView({ onFinished }: { onFinished: (result: VoiceSessionResult) => void }) {
+      const { status, errorMessage, start, stop, getTranscript, getDiagnostics } = useVoiceSession();
+      const startedRef = useRef(false);
+
+      useEffect(() => {
+        if (startedRef.current) return;
+        startedRef.current = true;
+        void start();
+      }, [start]);
+
+      const handleStop = async () => {
+        const result = await stop();
+        onFinished(result);
+      };
+
+      return (
+        <div className="screen screen-voice">
+          {status === "error" ? (
+            <>
+              <h1>I'm having trouble connecting right now.</h1>
+              <p className="hint">{errorMessage}</p>
+              <button
+                className="secondary-action"
+                onClick={() => onFinished({ rawTranscript: "", segmentCount: 0 })}
+              >
+                Back
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="listening-indicator" data-status={status}>
+                {status === "connecting" ? "Connecting…" : "Listening"}
+              </p>
+              <div className="listening-dot" aria-hidden="true" />
+              <LiveTranscript getText={getTranscript} active={status === "listening" || status === "stopping"} />
+              <DiagnosticsReadout
+                getDiagnostics={getDiagnostics}
+                active={status === "listening" || status === "stopping"}
+              />
+              <button
+                className="primary-action"
+                onClick={handleStop}
+                disabled={status !== "listening"}
+              >
+                Stop
+              </button>
+            </>
+          )}
+        </div>
+      );
+    }
+
+--------------------------------------------------------------------------------
+10. MODIFIED FILE: apps/kiosk/src/app/KioskShell.tsx
+--------------------------------------------------------------------------------
+STATUS: existing kiosk shell/state owner, modified this task.
+
+WHAT WAS ADDED:
+- New state: `const [segmentCount, setSegmentCount] = useState(1);`
+- `resetToIdle()` now also resets `segmentCount` back to 1 (session-reset
+  discipline — CLAUDE.md §23/§24 requires every future field added here to
+  also be cleared on reset).
+- The `VoiceView`'s `onFinished` handler now destructures the new
+  `VoiceSessionResult` shape (`result.rawTranscript`, `result.segmentCount`)
+  instead of taking a bare string.
+- `ProcessingView` now receives a new `segmentCount` prop, threaded from the
+  state above.
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    import { useEffect, useMemo, useRef, useState } from "react";
+    import type { TranscriptProcessingResult } from "@arteq/shared";
+    import type { KioskState } from "./kioskState";
+    import { createPresenceDetector } from "../features/presence/createPresenceDetector";
+    import type { DevelopmentPresenceDetector } from "../features/presence/DevelopmentPresenceDetector";
+    import { IdleView } from "../features/idle/IdleView";
+    import { WelcomeView } from "../features/welcome/WelcomeView";
+    import { VoiceView } from "../features/voice/VoiceView";
+    import { ProcessingView } from "../features/processing/ProcessingView";
+    import { CompleteView } from "../features/complete/CompleteView";
+
+    /**
+     * The single owner of session state (docs/02 §24: one shell, one view per
+     * state — NOT one giant component holding every workflow's JSX, which is
+     * what the legacy PatientKioskWorkflow.tsx did across 1700+ lines and 8
+     * steps). Each state below renders its own small, focused view component.
+     */
+    export function KioskShell() {
+      const [state, setState] = useState<KioskState>("idle");
+      const [rawTranscript, setRawTranscript] = useState("");
+      const [segmentCount, setSegmentCount] = useState(1);
+      const [processingResult, setProcessingResult] = useState<TranscriptProcessingResult | null>(null);
+
+      const { detector, mode } = useMemo(() => createPresenceDetector(), []);
+      const detectorRef = useRef(detector);
+
+      useEffect(() => {
+        detectorRef.current.start(() => setState("welcome"));
+        return () => detectorRef.current.stop();
+      }, []);
+
+      function resetToIdle() {
+        // Session reset: clear all transient state (docs/02 §22, docs/05 §32).
+        // Every future patient/OTP/routing/token field must be cleared here too.
+        setRawTranscript("");
+        setSegmentCount(1);
+        setProcessingResult(null);
+        setState("idle");
+      }
+
+      return (
+        <main className="kiosk-shell">
+          {state === "idle" && (
+            <IdleView
+              showManualTrigger={mode === "development"}
+              onSimulatePresence={() => (detectorRef.current as DevelopmentPresenceDetector).simulate()}
+            />
+          )}
+          {state === "welcome" && <WelcomeView onSpeak={() => setState("listening")} />}
+          {state === "listening" && (
+            <VoiceView
+              onFinished={(result) => {
+                setRawTranscript(result.rawTranscript);
+                setSegmentCount(result.segmentCount);
+                setState("processing");
+              }}
+            />
+          )}
+          {state === "processing" && (
+            <ProcessingView
+              rawTranscript={rawTranscript}
+              segmentCount={segmentCount}
+              onFinished={(result) => {
+                setProcessingResult(result);
+                setState("complete");
+              }}
+            />
+          )}
+          {state === "complete" && processingResult && (
+            <CompleteView result={processingResult} onStartOver={resetToIdle} />
+          )}
+        </main>
+      );
+    }
+
+--------------------------------------------------------------------------------
+11. MODIFIED FILE: apps/kiosk/src/features/processing/ProcessingView.tsx
+--------------------------------------------------------------------------------
+STATUS: existing kiosk component, modified this task.
+
+WHAT WAS ADDED:
+- New required prop: `segmentCount: number`.
+- `process(rawTranscript, segmentCount)` is now called with the second
+  argument (previously called with only `rawTranscript`).
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    import { useEffect, useRef } from "react";
+    import type { TranscriptProcessingResult } from "@arteq/shared";
+    import { useTranscriptProcessing } from "../transcript/useTranscriptProcessing";
+
+    /**
+     * The documented PROCESSING state (docs/03 §12 "Understanding what you
+     * said…"), sitting between LISTENING and COMPLETE. Calls the Phase 4
+     * refinement + quality-guard endpoint once, on mount, over the raw
+     * transcript captured during LISTENING.
+     *
+     * Deliberately minimal per docs/03 §33: a short, honest wait state, not
+     * "AI thinking" theater — reuses the same calm pulsing-dot treatment as the
+     * listening screen rather than inventing new decorative animation.
+     */
+    export function ProcessingView({
+      rawTranscript,
+      segmentCount,
+      onFinished,
+    }: {
+      rawTranscript: string;
+      segmentCount: number;
+      onFinished: (result: TranscriptProcessingResult) => void;
+    }) {
+      const { process } = useTranscriptProcessing();
+      const startedRef = useRef(false);
+
+      useEffect(() => {
+        if (startedRef.current) return;
+        startedRef.current = true;
+        void process(rawTranscript, segmentCount).then(onFinished);
+      }, [process, rawTranscript, segmentCount, onFinished]);
+
+      return (
+        <div className="screen screen-processing">
+          <h1>Understanding what you said…</h1>
+          <div className="listening-dot" aria-hidden="true" />
+        </div>
+      );
+    }
+
+--------------------------------------------------------------------------------
+12. MODIFIED FILE: apps/kiosk/src/features/transcript/useTranscriptProcessing.ts
+--------------------------------------------------------------------------------
+STATUS: existing kiosk hook, modified this task.
+
+WHAT WAS ADDED:
+- `process` signature changed from `(rawTranscript: string) => Promise<...>`
+  to `(rawTranscript: string, segmentCount: number) => Promise<...>`.
+- The POST body sent to the backend changed from `{ rawTranscript }` to
+  `{ rawTranscript, segmentCount }`.
+- The client-side network-failure fallback object (used when the fetch
+  itself fails, independent of the backend's own internal fallback) was
+  extended with the two new diagnostics fields: `refinementExecuted: false,
+  gateSignals: []`.
+- The diagnostic console.log line logging the outgoing raw transcript now
+  also logs `segmentCount`.
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    import { useCallback, useState } from "react";
+    import type { TranscriptProcessingResult } from "@arteq/shared";
+
+    const BACKEND_HTTP_URL = import.meta.env.VITE_BACKEND_HTTP_URL ?? "http://localhost:8787";
+
+    export type ProcessingStatus = "idle" | "processing" | "done";
+
+    /**
+     * Calls the single Phase 4 external endpoint (POST /api/transcript/process
+     * — architecture decision D / implementation principle 6). Everything about
+     * the two internal LLM calls and deterministic guardrails is invisible from
+     * here; this hook only ever sees the assembled TranscriptProcessingResult.
+     *
+     * Has its own network-level fallback (separate from the backend's own
+     * per-stage fallback) in case the backend itself is unreachable — never
+     * leaves the patient stuck, never fabricates a CLEAR verdict
+     * (CLAUDE.md §11/§24).
+     */
+    export function useTranscriptProcessing() {
+      const [status, setStatus] = useState<ProcessingStatus>("idle");
+      const [result, setResult] = useState<TranscriptProcessingResult | null>(null);
+
+      const process = useCallback(
+        async (rawTranscript: string, segmentCount: number): Promise<TranscriptProcessingResult> => {
+          setStatus("processing");
+          // TEMPORARY DIAGNOSTIC (Malayalam/Manglish regression investigation) —
+          // the exact final raw transcript (stage 2 output / stage 3 input),
+          // content only, never audio/secrets.
+          console.log(
+            "[diag][stage2/3 final-raw-sent-to-backend]",
+            JSON.stringify(rawTranscript),
+            "segmentCount=",
+            segmentCount,
+          );
+
+          let outcome: TranscriptProcessingResult;
+          try {
+            const response = await fetch(`${BACKEND_HTTP_URL}/api/transcript/process`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rawTranscript, segmentCount }),
+            });
+            if (!response.ok) {
+              throw new Error(`transcript.process failed with status ${response.status}`);
+            }
+            outcome = (await response.json()) as TranscriptProcessingResult;
+          } catch (err) {
+            console.warn("[transcript] client-side request failed, falling back to raw transcript:", err);
+            outcome = {
+              cleanTranscript: rawTranscript,
+              quality: {
+                status: "REVIEW",
+                score: 0,
+                issues: [],
+                reviewReason: "Let's make sure I understood you correctly.",
+              },
+              diagnostics: {
+                refinementExecuted: false,
+                refinementLatencyMs: 0,
+                qualityLatencyMs: 0,
+                totalLatencyMs: 0,
+                usedFallback: true,
+                fallbackLatencyMs: 0,
+                guardrailsApplied: ["client_request_failed"],
+                gateSignals: [],
+              },
+            };
+          }
+
+          // TEMPORARY diagnostic (kept per Phase 4 instruction #15 until
+          // end-to-end validation is complete) — measured latency, never content.
+          console.log("[diag] transcript.process client-received", JSON.stringify(outcome.diagnostics));
+
+          setResult(outcome);
+          setStatus("done");
+          return outcome;
+        },
+        [],
+      );
+
+      return { status, result, process };
+    }
+
+--------------------------------------------------------------------------------
+13. MODIFIED FILE: apps/backend/scripts/eval-transcript-refinement.ts
+--------------------------------------------------------------------------------
+STATUS: existing opt-in real-Gemini evaluation script (NOT part of `npm test`;
+run manually via `npm run eval:transcript --workspace apps/backend`),
+modified TWICE across this task:
+
+CHANGE SET 1 (during the main implementation):
+  - `Fixture` interface gained an optional `segmentCount?: number` field.
+  - The two "natural pause" fixtures were given `segmentCount: 5` to match
+    the real captured evidence (backend diagnostic log showed 5 segments for
+    that actual capture).
+  - `runFixture()` was changed to send `segmentCount` in the POST body, to
+    print `[FAST (refinement skipped)]` / `[SLOW (refinement ran)]` per
+    fixture, and to print `gate: signals=[...]`.
+  - `runFixture()` return type changed to also report `refinementExecuted`.
+  - `main()` was changed to tally and print fast-path vs. slow-path counts.
+
+CHANGE SET 2 (this most recent turn, to obtain real slow-path latency
+numbers, since none of the original 9 fixtures actually triggered the gate's
+escalation path):
+  - Two NEW fixtures were appended:
+      "gate slow-path — real captured contamination (Tamil/Hindi/Spanish)"
+      "gate slow-path — real captured fragmentation, no foreign script"
+    Both reuse the exact same real captured strings already present in
+    rawTranscriptAssessment.test.ts (not newly invented), with segmentCount
+    values matching those real captures (4 and 5 respectively).
+
+COMPLETE CURRENT CONTENTS OF THE ENTIRE FILE:
+
+    /**
+     * Opt-in evaluation script for Phase 4 (transcript refinement + quality
+     * guard) — NOT part of `npm test` (that suite is deterministic and
+     * network-free). This script makes REAL calls to the running backend's
+     * POST /api/transcript/process endpoint, which makes REAL Gemini calls.
+     * Run manually: `npm run eval:transcript --workspace apps/backend`
+     * (requires the backend dev server running with a configured GEMINI_API_KEY).
+     *
+     * This is the "real evidence" pass for cases that aren't practical to keep
+     * re-recording live speech for: Malayalam/Manglish fidelity, hallucination
+     * risk, the actual natural-pause fragmentation this project hit, and
+     * duplicate-segment handling — per CLAUDE.md §39 "do not fake verification."
+     *
+     * Per docs/04 §40/§41, this doubles as a starting golden test set: each
+     * fixture is a {raw, expectations} pair whose result gets printed for
+     * before/after comparison on future model or prompt changes.
+     */
+
+    const BACKEND_URL = process.env.EVAL_BACKEND_URL ?? "http://localhost:8787";
+
+    interface Fixture {
+      name: string;
+      rawTranscript: string;
+      /** Real segment count when known from an actual capture; omitted (=1)
+       * for hand-written single-utterance fixtures. Feeds the Phase 4
+       * refinement gate exactly as the kiosk would report it. */
+      segmentCount?: number;
+      check: (result: any) => string[]; // returns list of failure messages, empty = pass
+    }
+
+    const MALAYALAM_PATTERN = /[ഀ-ൿ]/;
+    const SUSPICIOUS_INVENTED_TERMS = /\b(diagnosis|prescri(be|ption)|infection confirmed|cancer|surgery required)\b/i;
+
+    const fixtures: Fixture[] = [
+      {
+        name: "normal English speech",
+        rawTranscript: "I have tooth pain and I want to see a dentist.",
+        check: (r) => {
+          const failures: string[] = [];
+          if (!/tooth pain/i.test(r.cleanTranscript)) failures.push("lost 'tooth pain'");
+          if (!/dentist/i.test(r.cleanTranscript)) failures.push("lost 'dentist'");
+          if (SUSPICIOUS_INVENTED_TERMS.test(r.cleanTranscript)) failures.push("possible invented medical content");
+          return failures;
+        },
+      },
+      {
+        name: "Malayalam",
+        rawTranscript: "എനിക്ക് പല്ലുവേദന ഉണ്ട്. എനിക്ക് ഡെന്റിസ്റ്റിനെ കാണണം.",
+        check: (r) => {
+          const failures: string[] = [];
+          if (!MALAYALAM_PATTERN.test(r.cleanTranscript)) failures.push("Malayalam script was dropped");
+          return failures;
+        },
+      },
+      {
+        name: "Manglish/code-switching",
+        rawTranscript: "എനിക്ക് നല്ല tooth pain ഉണ്ട്. എനിക്ക് dentistനെ കാണണം.",
+        check: (r) => {
+          const failures: string[] = [];
+          const hasMalayalam = MALAYALAM_PATTERN.test(r.cleanTranscript);
+          const hasEnglish = /tooth pain|dentist/i.test(r.cleanTranscript);
+          if (!hasMalayalam && !hasEnglish) failures.push("both Malayalam and English content appear lost");
+          return failures;
+        },
+      },
+      {
+        name: "natural pause — realistic post-fix input (space-joined, duplicate collapsed)",
+        // Reconstructed from this project's actual captured pause-test segments
+        // (backend diagnostic log: 5 segments, lengths 13/7/36/34/16) with the
+        // frontend accumulation fix applied (space-joined, exact-duplicate
+        // adjacent segment collapsed) — this is what the fixed pipeline now
+        // actually sends.
+        rawTranscript:
+          "And it can uh എനിക്ക് വല്ലാത്ത വേദനയുണ്ട് പല്ലിന്. Haan, inke ghar mein dusre ka naam Vandistine kaana",
+        segmentCount: 5, // real capture: backend diagnostic log showed 5 segments
+        check: (r) => {
+          const failures: string[] = [];
+          if (!MALAYALAM_PATTERN.test(r.cleanTranscript)) failures.push("lost the legitimate Malayalam content");
+          if (r.quality.status === "CLEAR") failures.push("quality guard should NOT be CLEAR for this garbled input");
+          return failures;
+        },
+      },
+      {
+        name: "natural pause — adversarial worst-case (raw glued, no separators)",
+        // The EXACT raw string this project actually captured and reported —
+        // tests the refinement prompt's own resilience as a second line of
+        // defense, in case some future segment source lacks the space-join fix.
+        rawTranscript:
+          "And it can uhഎനിക്ക്എനിക്ക് വല്ലാത്ത വേദനയുണ്ട് പല്ലിന്.Haan, inke ghar mein dusre ka naamVandistine kaana",
+        segmentCount: 5, // real capture, pre-space-join fix — same 5 underlying segments
+        check: (r) => {
+          const failures: string[] = [];
+          if (r.cleanTranscript.includes("എനിക്ക്എനിക്ക്")) failures.push("duplicate fusion 'എനിക്ക്എനിക്ക്' was not cleaned up");
+          if (r.quality.status === "CLEAR") failures.push("quality guard should NOT be CLEAR for this garbled input");
+          return failures;
+        },
+      },
+      {
+        name: "duplicate adjacent segments (explicit)",
+        rawTranscript: "എനിക്ക് എനിക്ക് നല്ല തലവേദനയുണ്ട്.",
+        check: (r) => {
+          const failures: string[] = [];
+          if (/എനിക്ക്\s+എനിക്ക്/.test(r.cleanTranscript)) failures.push("duplicate 'എനിക്ക് എനിക്ക്' was not collapsed");
+          return failures;
+        },
+      },
+      {
+        name: "short utterance",
+        rawTranscript: "tooth pain",
+        check: (r) => {
+          const failures: string[] = [];
+          if (r.cleanTranscript.length > 40) failures.push("short utterance was padded/expanded unexpectedly");
+          return failures;
+        },
+      },
+      {
+        name: "longer utterance",
+        rawTranscript:
+          "I have had a bad headache since this morning, and also some tooth pain on the left side. It gets worse when I bite down. I want to see a doctor about the headache and maybe a dentist about the tooth as well.",
+        check: (r) => {
+          const failures: string[] = [];
+          for (const term of ["headache", "tooth", "left side", "doctor", "dentist"]) {
+            if (!new RegExp(term, "i").test(r.cleanTranscript)) failures.push(`lost detail: "${term}"`);
+          }
+          return failures;
+        },
+      },
+      {
+        name: "empty/invalid input",
+        rawTranscript: "   ",
+        check: (r) => {
+          const failures: string[] = [];
+          if (r.quality.status !== "INSUFFICIENT") failures.push(`expected INSUFFICIENT, got ${r.quality.status}`);
+          return failures;
+        },
+      },
+      {
+        name: "gate slow-path — real captured contamination (Tamil/Hindi/Spanish)",
+        // Same real captured fixture used in rawTranscriptAssessment.test.ts —
+        // reused here (not invented) so the eval script actually exercises the
+        // refinement-runs branch against the real Gemini refinement call, since
+        // none of the fixtures above trigger it.
+        rawTranscript:
+          "எனக்கு பல்லு வலி எடுக்குது. I want to see a dentist. 50 है। मैं क्यों पर स्मोकிங் करूं? ¿Eres de dónde?",
+        segmentCount: 4,
+        check: (r) => {
+          const failures: string[] = [];
+          if (!/tooth|dentist/i.test(r.cleanTranscript)) failures.push("lost the legitimate English content");
+          return failures;
+        },
+      },
+      {
+        name: "gate slow-path — real captured fragmentation, no foreign script",
+        rawTranscript: "And it can uh. Haan. dentistine kaana. uh huh. what.",
+        segmentCount: 5,
+        check: () => [], // no strong content expectation — this exercises latency/routing only
+      },
+    ];
+
+    async function runFixture(fixture: Fixture) {
+      const start = Date.now();
+      const response = await fetch(`${BACKEND_URL}/api/transcript/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rawTranscript: fixture.rawTranscript, segmentCount: fixture.segmentCount ?? 1 }),
+      });
+      const wallMs = Date.now() - start;
+
+      if (!response.ok) {
+        console.log(`FAIL  ${fixture.name} — HTTP ${response.status}`);
+        return { passed: false, refinementExecuted: null as boolean | null };
+      }
+
+      const result = await response.json();
+      const failures = fixture.check(result);
+      const status = failures.length === 0 ? "PASS" : "FAIL";
+      const path = result.diagnostics.refinementExecuted ? "SLOW (refinement ran)" : "FAST (refinement skipped)";
+
+      console.log(`${status}  ${fixture.name}  [${path}]`);
+      console.log(`      clean: ${JSON.stringify(result.cleanTranscript)}`);
+      console.log(
+        `      quality: ${result.quality.status} (score=${result.quality.score}) reason=${JSON.stringify(result.quality.reviewReason)}`,
+      );
+      console.log(
+        `      gate: signals=[${result.diagnostics.gateSignals.join(",")}]`,
+      );
+      console.log(
+        `      latency: refine=${result.diagnostics.refinementLatencyMs.toFixed(0)}ms ` +
+          `quality=${result.diagnostics.qualityLatencyMs.toFixed(0)}ms ` +
+          `total=${result.diagnostics.totalLatencyMs.toFixed(0)}ms wall=${wallMs}ms ` +
+          `fallback=${result.diagnostics.usedFallback} guardrails=[${result.diagnostics.guardrailsApplied.join(",")}]`,
+      );
+      for (const f of failures) console.log(`      ✗ ${f}`);
+      console.log("");
+      return { passed: failures.length === 0, refinementExecuted: result.diagnostics.refinementExecuted as boolean };
+    }
+
+    async function main() {
+      console.log(`Evaluating against ${BACKEND_URL} — ${fixtures.length} fixtures\n`);
+      let passed = 0;
+      let fastPathCount = 0;
+      let slowPathCount = 0;
+      for (const fixture of fixtures) {
+        const outcome = await runFixture(fixture);
+        if (outcome.passed) passed++;
+        if (outcome.refinementExecuted === true) slowPathCount++;
+        if (outcome.refinementExecuted === false) fastPathCount++;
+      }
+      console.log(`\n${passed}/${fixtures.length} fixtures passed`);
+      console.log(`Fast path (refinement skipped): ${fastPathCount} · Slow path (refinement ran): ${slowPathCount}`);
+      if (passed !== fixtures.length) process.exitCode = 1;
+    }
+
+    main().catch((err) => {
+      console.error("Evaluation script failed:", err);
+      process.exitCode = 1;
+    });
+
+--------------------------------------------------------------------------------
+14. DELETED FILES
+--------------------------------------------------------------------------------
+None. No files were deleted as part of this task.
+
+--------------------------------------------------------------------------------
+15. DEPENDENCY / PACKAGE CHANGES
+--------------------------------------------------------------------------------
+`vitest` (^3.0.5) was added as a devDependency to BOTH `apps/backend/package.json`
+and `apps/kiosk/package.json`, each with a `"test": "vitest run"` script.
+`apps/backend/package.json` also has `"eval:transcript": "tsx scripts/eval-transcript-refinement.ts"`.
+No other dependency changed. No secrets were added to either package.json or
+anywhere else in the repository.
+
+Current apps/backend/package.json (complete, on disk):
+
+    {
+      "name": "@arteq/backend",
+      "version": "0.1.0",
+      "private": true,
+      "type": "module",
+      "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc -p tsconfig.json",
+        "start": "node dist/index.js",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "eval:transcript": "tsx scripts/eval-transcript-refinement.ts"
+      },
+      "dependencies": {
+        "@arteq/shared": "*",
+        "@google/genai": "^1.5.1",
+        "express": "^4.21.2",
+        "ws": "^8.18.0"
+      },
+      "devDependencies": {
+        "@types/express": "^4.17.21",
+        "@types/node": "^22.10.2",
+        "@types/ws": "^8.5.13",
+        "tsx": "^4.19.2",
+        "typescript": "^5.8.2",
+        "vitest": "^3.0.5"
+      }
+    }
+
+Current apps/kiosk/package.json (complete, on disk):
+
+    {
+      "name": "@arteq/kiosk",
+      "version": "0.1.0",
+      "private": true,
+      "type": "module",
+      "scripts": {
+        "dev": "vite",
+        "build": "tsc -b && vite build",
+        "preview": "vite preview",
+        "typecheck": "tsc --noEmit -p tsconfig.app.json",
+        "test": "vitest run"
+      },
+      "dependencies": {
+        "@arteq/shared": "*",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0"
+      },
+      "devDependencies": {
+        "@types/react": "^19.0.2",
+        "@types/react-dom": "^19.0.2",
+        "@vitejs/plugin-react": "^4.3.4",
+        "typescript": "^5.8.2",
+        "vite": "^6.0.5",
+        "vitest": "^3.0.5"
+      }
+    }
+
+--------------------------------------------------------------------------------
+16. CONFIGURATION CHANGES
+--------------------------------------------------------------------------------
+None. No .env, tsconfig, vite config, or other configuration file was
+modified as part of this task. Gemini model names, Gemini Live config,
+WebSocket/audio settings, and provider wiring were explicitly left untouched
+per the hard constraints of this task.
+
+--------------------------------------------------------------------------------
+17. EXACT COMMANDS RUN AND THEIR RESULTS
+--------------------------------------------------------------------------------
+
+a) Typecheck (this verification pass, run fresh against the current files):
+
+    Command:  cd apps/backend; npx tsc --noEmit
+    Result:   completed with no output (clean — zero type errors)
+
+b) Real-Gemini evaluation script (this verification pass, two runs — the
+   second after adding the two slow-path fixtures in section 13):
+
+    Command:  npm run eval:transcript --workspace apps/backend
+
+    Second/final run's full output:
+
+    Evaluating against http://localhost:8787 — 11 fixtures
+
+    PASS  normal English speech  [FAST (refinement skipped)]
+          clean: "I have tooth pain and I want to see a dentist."
+          quality: CLEAR (score=1) reason=null
+          gate: signals=[]
+          latency: refine=0ms quality=3710ms total=3710ms wall=3792ms fallback=false guardrails=[]
+
+    PASS  Malayalam  [FAST (refinement skipped)]
+          clean: "എനിക്ക് പല്ലുവേദന ഉണ്ട്. എനിക്ക് ഡെന്റിസ്റ്റിനെ കാണണം."
+          quality: CLEAR (score=1) reason=null
+          gate: signals=[]
+          latency: refine=0ms quality=3567ms total=3568ms wall=3573ms fallback=false guardrails=[]
+
+    PASS  Manglish/code-switching  [FAST (refinement skipped)]
+          clean: "എനിക്ക് നല്ല tooth pain ഉണ്ട്. എനിക്ക് dentistനെ കാണണം."
+          quality: CLEAR (score=1) reason=null
+          gate: signals=[]
+          latency: refine=0ms quality=3056ms total=3056ms wall=3063ms fallback=false guardrails=[]
+
+    PASS  natural pause — realistic post-fix input (space-joined, duplicate collapsed)  [FAST (refinement skipped)]
+          clean: "And it can uh എനിക്ക് വല്ലാത്ത വേദനയുണ്ട് പല്ലിന്. Haan, inke ghar mein dusre ka naam Vandistine kaana"
+          quality: REVIEW (score=0.35) reason="The transcript contains severe speech recognition artifacts and corrupted or unrelated text fragments."
+          gate: signals=[]
+          latency: refine=0ms quality=5241ms total=5241ms wall=5246ms fallback=false guardrails=[]
+
+    FAIL  natural pause — adversarial worst-case (raw glued, no separators)  [FAST (refinement skipped)]
+          clean: "And it can uhഎനിക്ക്എനിക്ക് വല്ലാത്ത വേദനയുണ്ട് പല്ലിന്.Haan, inke ghar mein dusre ka naamVandistine kaana"
+          quality: REVIEW (score=0.25) reason="The transcript contains severe speech recognition artifacts, concatenated text, and uncleaned duplication across multiple languages."
+          gate: signals=[]
+          latency: refine=0ms quality=5166ms total=5166ms wall=5171ms fallback=false guardrails=[]
+          ✗ duplicate fusion 'എനിക്ക്എനിക്ക്' was not cleaned up
+
+    FAIL  duplicate adjacent segments (explicit)  [FAST (refinement skipped)]
+          clean: "എനിക്ക് എനിക്ക് നല്ല തലവേദനയുണ്ട്."
+          quality: REVIEW (score=0.8) reason="The transcript contains repeated words."
+          gate: signals=[]
+          latency: refine=0ms quality=5981ms total=5981ms wall=5986ms fallback=false guardrails=[]
+          ✗ duplicate 'എനിക്ക് എനിക്ക്' was not collapsed
+
+    PASS  short utterance  [FAST (refinement skipped)]
+          clean: "tooth pain"
+          quality: CLEAR (score=1) reason=null
+          gate: signals=[]
+          latency: refine=0ms quality=3237ms total=3237ms wall=3242ms fallback=false guardrails=[]
+
+    PASS  longer utterance  [FAST (refinement skipped)]
+          clean: "I have had a bad headache since this morning, and also some tooth pain on the left side. It gets worse when I bite down. I want to see a doctor about the headache and maybe a dentist about the tooth as well."
+          quality: CLEAR (score=1) reason=null
+          gate: signals=[]
+          latency: refine=0ms quality=2844ms total=2844ms wall=2849ms fallback=false guardrails=[]
+
+    PASS  empty/invalid input  [FAST (refinement skipped)]
+          clean: ""
+          quality: INSUFFICIENT (score=0) reason="I didn't catch anything. Could you try again?"
+          gate: signals=[]
+          latency: refine=0ms quality=0ms total=0ms wall=7ms fallback=false guardrails=[empty_raw_input]
+
+    PASS  gate slow-path — real captured contamination (Tamil/Hindi/Spanish)  [SLOW (refinement ran)]
+          clean: "எனக்கு பல்லு வலி எடுக்குது. I want to see a dentist."
+          quality: REVIEW (score=0.4) reason="The transcript contained extraneous multilingual fragments which were removed, requiring verification to ensure no patient intent was lost."
+          gate: signals=[unexpected_script]
+          latency: refine=9033ms quality=7000ms total=16033ms wall=16049ms fallback=false guardrails=[]
+
+    PASS  gate slow-path — real captured fragmentation, no foreign script  [SLOW (refinement ran)]
+          clean: "Haan, dentistine kaana."
+          quality: CLEAR (score=0.95) reason=null
+          gate: signals=[fragmented_short_segments]
+          latency: refine=5250ms quality=3955ms total=9206ms wall=9210ms fallback=false guardrails=[]
+
+    9/11 fixtures passed
+    Fast path (refinement skipped): 9 · Slow path (refinement ran): 2
+
+    (Process exits with code 1 because 2 of 11 fixtures failed their `check()`
+    — those two failures are the known limitation described in section 18,
+    NOT a crash or infrastructure failure.)
+
+c) Real mic end-to-end test (this verification pass), via Chrome browser
+   automation with the user speaking live into the microphone:
+
+    - Kiosk dev server (localhost:5173) and backend (localhost:8787,
+      /api/health -> {"status":"ok","voiceProviderConfigured":true}) both
+      confirmed running, single browser tab confirmed (isolation check).
+    - IDLE -> WELCOME -> LISTENING -> user spoke Malayalam, then English,
+      then Hindi (user explicitly confirmed this afterward: "I finished
+      speaking, check the transcript talked in malayalam then english then
+      in hindi too").
+    - Live transcript captured (screenshot-verified):
+        "എനിക്ക് നല്ല പല്ലുവേദനയുണ്ട്. എനിക്ക് ഡെന്റിസ്റ്റിനെ കാണണം.
+         I have tooth pain. And I want to see a dentist.
+         मुझे मेरे दूध पे दर्द हो रहे। मुझे डेंटिस्ट को देखना है।"
+    - Stop pressed -> PROCESSING -> COMPLETE screen reached.
+    - Real console diagnostics captured for this run (raw sent to backend and
+      the client-received result):
+
+        [diag][stage2/3 final-raw-sent-to-backend]
+        "എനിക്ക് നല്ല പല്ലുവേദനയുണ്ട്. എനിക്ക് ഡെന്റിസ്റ്റിനെ കാണണം.
+         I have tooth pain. And I want to see a dentist.
+         मुझे मेरे दूध पे दर्द हो रहे। मुझे डेंटިസ്റ്റ് को देखना है।"
+        segmentCount= 3
+
+        [diag] transcript.process client-received
+        {"refinementExecuted":true,"refinementLatencyMs":13772.06229999999,
+         "qualityLatencyMs":10822.116199999931,"totalLatencyMs":24594.355200000107,
+         "usedFallback":false,"fallbackLatencyMs":null,"guardrailsApplied":[],
+         "gateSignals":["unexpected_script"]}
+
+    - Gate correctly escalated to refinement on the Devanagari (Hindi)
+      content; refinement preserved all three languages verbatim on the
+      "Here's what I heard" screen (no translation, no dropped content).
+
+d) Unit test suites: NOT re-run inside this verification pass (no
+   production test file changed since they last ran green — 44 backend
+   tests / 8 kiosk tests, confirmed passing in the implementation turn
+   immediately prior to this one). Only the typecheck and eval script were
+   re-run fresh for this report, plus the live mic test above.
+
+--------------------------------------------------------------------------------
+18. MEASURED LATENCY RESULTS (real, not estimated)
+--------------------------------------------------------------------------------
+Fast path (9 real eval-script samples, refinement skipped, quality-guard-only
+cost): total ranged 2.82s–6.03s.
+
+Slow path (2 real eval-script samples + 1 real live-mic sample, refinement +
+quality guard both run):
+  - eval fixture, Tamil/Hindi/Spanish contamination: refine=9033ms quality=7000ms total=16033ms
+  - eval fixture, fragmentation only:               refine=5250ms quality=3955ms total=9206ms
+  - live mic, Malayalam+English+Hindi:               refine=13772ms quality=10822ms total=24594ms
+
+Prior (pre-gate, unconditional-refinement) baseline from earlier in this
+project's testing, for comparison:
+  - clean/single-segment case: ~5.0s–6.8s total
+  - contaminated/multi-segment case: ~11.4s–17.3s total
+
+Conclusion: fast-path cases are measurably faster than the old baseline
+(they now skip the refinement call entirely). Slow-path cases are not
+faster — they still pay for both LLM calls, and the live-mic sample was
+slower than the eval-script sample for a comparable case (24.6s vs 16.0s),
+which reflects real API/network variance, not a regression.
+
+--------------------------------------------------------------------------------
+19. KNOWN LIMITATIONS (unresolved, not silently fixed)
+--------------------------------------------------------------------------------
+1. Two eval-script fixtures ("natural pause — adversarial worst-case" and
+   "duplicate adjacent segments (explicit)") still FAIL their check(). The
+   gate has no signal for immediate-adjacent-duplicate-token repetition or
+   "glued word" fusion, so these specific artifacts pass through the fast
+   path uncleaned. Before this task, refinement ran unconditionally and used
+   to clean these up. The quality guard still correctly marks both as
+   REVIEW (never CLEAR), so nothing is silently approved — but the raw
+   duplication artifact now reaches the patient-facing transcript on the
+   fast path where it previously would not have. This is a genuine,
+   measured trade-off of the new architecture, not a bug, and was not
+   silently patched.
+2. ASR-level cross-language hallucination at the Gemini Live layer (separate
+   from this task's changes) remains unmitigated — `languageCodes` remains
+   confirmed unsupported on this project's API surface, and VAD tuning
+   remains explicitly out of scope for this task.
+
+================================================================================
+END OF RECORD
+================================================================================

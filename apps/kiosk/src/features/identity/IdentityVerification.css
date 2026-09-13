@@ -1,0 +1,75 @@
+.identity-flow .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.identity-flow input {
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-default);
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.identity-flow input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.identity-actions {
+  display: flex;
+  gap: 1rem;
+}
+
+.identity-actions button {
+  flex: 1;
+}
+
+.id-capture {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.video-container {
+  width: 100%;
+  max-width: 400px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 4/3;
+}
+
+.video-container video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.capture-actions {
+  display: flex;
+  gap: 1rem;
+  width: 100%;
+  max-width: 400px;
+}
+
+.capture-actions button {
+  flex: 1;
+}
+
+.identity-error {
+  color: #e53e3e;
+  font-size: 0.9rem;
+  margin-top: -0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.identity-hint {
+  font-size: 0.85rem;
+  margin-top: -0.25rem;
+  margin-bottom: 0.75rem;
+}

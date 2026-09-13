@@ -1,0 +1,487 @@
+:root {
+    
+    /* vars */
+    
+    --size: 1.8em;
+    
+}
+
+
+progress {
+            
+    --color-1: oklch(0.44 0.05 260 / 0.7);
+    --color-2: oklch(0.44 0.025 260 / 0.7);
+    --color-3: oklch(0.8 0.075 260 / 0.7);
+    --color-4: oklch(0.5 0.02 260 / 0.7);
+    
+    --gradient-start: var(--color-1);
+    --gradient-end: var(--color-3);
+    
+    --bg: light-dark(oklch(0.92 0.02 260 / 0.75), oklch(0.26 0.02 260 / 0.75));
+    
+    appearance: none;
+    width: auto;
+    font-size: var(--size);
+    height: 2.5em;
+    border-radius: 99vw;
+    border: none;
+    padding: 0.2em;
+    container-type: inline-size;
+    
+    background: 
+        linear-gradient( 
+            to bottom, 
+            oklch( from var(--bg) calc(l - 0.1) c h ), 
+            oklch( from var(--bg) l c h ) 66% 
+        ) border-box;
+    
+    box-shadow:
+        inset 0 0 0 max(1px, 0.05em) oklch( from var(--bg) calc(l - 0.1) c h / 0.33 );
+    
+}
+
+progress::-moz-progress-bar {
+    
+    width: 100%;
+    border-radius: 99vw;
+    border: max(1px, 0.1em) transparent solid;
+    padding-inline: 0.95em;
+    
+    --color-gradient:
+        linear-gradient(
+            to right,
+            var(--color-1) 5%,
+            var(--color-2),
+            var(--color-3) 50%,
+            var(--color-4)
+        );
+    
+    background: 
+         radial-gradient(
+            70% 2em at center 120%,
+            oklch(0.99 0.025 260 / 100%) 0%,
+            oklch(0.99 0.025 260 / 88%) 21%,
+            oklch(0.99 0.025 260 / 75%) 30%,
+            oklch(0.99 0.025 260 / 64%) 39%,
+            oklch(0.99 0.025 260 / 52%) 46%,
+            oklch(0.99 0.025 260 / 41%) 54%,
+            oklch(0.99 0.025 260 / 31%) 61%,
+            oklch(0.99 0.025 260 / 21%) 69%,
+            oklch(0.99 0.025 260 / 12%) 79%,
+            oklch(0.99 0.025 260 / 0%) 100%
+        ) padding-box,
+        
+        var(--color-gradient) padding-box,
+        
+        linear-gradient( 
+            to bottom, 
+            oklch(0.95 0.01 260), 
+            oklch(0.92 0.018 260 / 80%) 33%, 
+            oklch(0.99 0.01 260 / 80%)
+        ) padding-box,
+        
+        linear-gradient( 
+            165deg, 
+            oklch(0.94 0.025 260 / 80%) 25%, 
+            oklch(0.99 0.01 260 / 80%)
+        ) border-box;
+    
+    background-blend-mode:
+        normal, overlay, normal, normal;
+    
+    background-size: cover, 100cqw 100%, cover, cover;
+    
+    --outer-shadow: 
+        light-dark(oklch(0.99 0.02 260 / 0.8), oklch(0.4 0.02 260 / 0.8)) 1em 0.66em 1em -0.66em,
+        oklch(0.35 0.1 260 / 0.05) 0px max(4px, 0.3em) 0.3em 0px, 
+        oklch(0.35 0.1 260 / 0.07) 0px max(2px, 0.18em) 0.18em 0px, 
+        oklch(0.35 0.1 260 / 0.05) 0px max(1px, 0.05em) max(2px, 0.05em) 0px;
+    
+    --inner-shadow:
+        inset 0.2em 0.2em 0.3em -0.1em oklch(0.92 0.018 260 / 80%),
+        inset -0.2em -0.2em 0.3em -0.1em oklch(0.98 0.018 260 / 80%);
+        
+    box-shadow: 
+        var(--inner-shadow),
+        var(--outer-shadow);
+    
+}
+
+progress:indeterminate::-moz-progress-bar {
+    
+    --color-gradient:
+        linear-gradient(
+            to right,
+            oklch( from var(--gradient-start)  l c h / 0 ) 0%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 11.5%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 13.5%,
+            oklch( from var(--gradient-end) l c h / 0 ),
+            oklch( from var(--gradient-end) l c h / 1 ) 36.5%,
+            oklch( from var(--gradient-end) l c h / 1 ) 38.5%,
+            oklch( from var(--gradient-end) l c h / 0 ) 50%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 61.5%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 63.5%,
+            oklch( from var(--gradient-start)  l c h / 0 ),
+            oklch( from var(--gradient-end) l c h / 1 ) 86.5%,
+            oklch( from var(--gradient-end) l c h / 1 ) 88.5%,
+            oklch( from var(--gradient-end) l c h / 0 ) 100%
+        ) repeat;
+    
+    background-size: 200% 100%;
+    background-position: center, var(--bgpos, 0%), center, center;
+    animation: bg-scroll var(--speed, 0.8s) linear infinite;
+    
+}
+
+progress[data-reverse]:indeterminate::-moz-progress-bar {
+    animation-direction: reverse;
+}
+
+progress[data-alternate]:indeterminate::-moz-progress-bar {
+    animation-direction: alternate;
+    animation-timing-function: var(--cubic);
+}
+
+
+/* chrome replica of the Firefox code above */
+
+progress::-webkit-progress-bar {
+    appearance: none;
+    background: none;
+}
+
+progress::-webkit-progress-value {
+    
+    width: 100%;
+    border-radius: 99vw;
+    border: max(1px, 0.1em) transparent solid;
+    padding-inline: 0.9em;
+    
+    --color-gradient:
+        linear-gradient(
+            to right,
+            var(--color-1) 5%,
+            var(--color-2),
+            var(--color-3) 50%,
+            var(--color-4)
+        );
+    
+    background: 
+         radial-gradient(
+            70% 2em at center 120%,
+            oklch(0.99 0.025 260 / 100%) 0%,
+            oklch(0.99 0.025 260 / 88%) 21%,
+            oklch(0.99 0.025 260 / 75%) 30%,
+            oklch(0.99 0.025 260 / 64%) 39%,
+            oklch(0.99 0.025 260 / 52%) 46%,
+            oklch(0.99 0.025 260 / 41%) 54%,
+            oklch(0.99 0.025 260 / 31%) 61%,
+            oklch(0.99 0.025 260 / 21%) 69%,
+            oklch(0.99 0.025 260 / 12%) 79%,
+            oklch(0.99 0.025 260 / 0%) 100%
+        ) padding-box,
+        
+        var(--color-gradient) padding-box,
+        
+        linear-gradient( 
+            to bottom, 
+            oklch(0.95 0.01 260), 
+            oklch(0.92 0.018 260 / 80%) 33%, 
+            oklch(0.99 0.01 260 / 80%)
+        ) padding-box,
+        
+        linear-gradient( 
+            165deg, 
+            oklch(0.94 0.025 260 / 80%) 25%, 
+            oklch(0.99 0.01 260 / 80%)
+        ) border-box;
+    
+    background-blend-mode:
+        normal, overlay, normal, normal;
+    
+    background-size: cover, 100cqw 100%, cover, cover;
+    
+    --outer-shadow: 
+        light-dark(oklch(0.99 0.02 260 / 0.8), oklch(0.4 0.02 260 / 0.8)) 1em 0.66em 1em -0.66em,
+        oklch(0.35 0.1 260 / 0.05) 0px max(4px, 0.3em) 0.3em 0px, 
+        oklch(0.35 0.1 260 / 0.07) 0px max(2px, 0.18em) 0.18em 0px, 
+        oklch(0.35 0.1 260 / 0.05) 0px max(1px, 0.05em) max(2px, 0.05em) 0px;
+    
+    --inner-shadow:
+        inset 0.2em 0.2em 0.3em -0.1em oklch(0.92 0.018 260 / 80%),
+        inset -0.2em -0.2em 0.3em -0.1em oklch(0.98 0.018 260 / 80%);
+        
+    box-shadow: 
+        var(--inner-shadow),
+        var(--outer-shadow);
+    
+}
+
+progress:indeterminate::-webkit-progress-value {
+    
+    inline-size: 100%!important;
+    
+    --color-gradient:
+        linear-gradient(
+            to right,
+            oklch( from var(--gradient-start)  l c h / 0 ) 0%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 11.5%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 13.5%,
+            oklch( from var(--gradient-end) l c h / 0 ),
+            oklch( from var(--gradient-end) l c h / 1 ) 36.5%,
+            oklch( from var(--gradient-end) l c h / 1 ) 38.5%,
+            oklch( from var(--gradient-end) l c h / 0 ) 50%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 61.5%,
+            oklch( from var(--gradient-start)  l c h / 1 ) 63.5%,
+            oklch( from var(--gradient-start)  l c h / 0 ),
+            oklch( from var(--gradient-end) l c h / 1 ) 86.5%,
+            oklch( from var(--gradient-end) l c h / 1 ) 88.5%,
+            oklch( from var(--gradient-end) l c h / 0 ) 100%
+        ) repeat;
+    
+    background-size: 200% 100%;
+    background-position: center, var(--bgpos, 0%), center, center;
+    animation: bg-scroll var(--speed, 0.8s) linear infinite;
+    
+}
+
+
+
+
+/* different color styles */
+
+progress[data-style="sunset"] {
+    --color-1: oklch(0.66 0.25 30 / 1);
+    --color-2: oklch(0.72 0.2 55 / 1);
+    --color-3: oklch(0.79 0.2 80 / 1);
+    --color-4: oklch(0.96 0.24 90 / 1);
+}
+
+progress[data-style="ice"] {
+    --color-1: oklch(1 0.06 195 / 1);
+    --color-2: oklch(0.88 0.13 195 / 1);
+    --color-3: oklch(0.58 0.24 233 / 1);
+    --color-4: oklch(0.66 0.28 262 / 1);
+    --gradient-start: var(--color-2);
+    --gradient-end: var(--color-4);
+}
+
+progress[data-style="slime"] {
+    --color-1: oklch(0.66 0.25 300 / 1);
+    --color-2: oklch(0.8 0.1 200 / 1);
+    --color-3: oklch(0.84 0.2 154 / 1);
+    --color-4: oklch(0.9 0.25 130 / 1);
+}
+
+progress[data-style="AI"] {
+    --color-1: oklch(0.65 0.25 263 / 1);
+    --color-2: oklch(0.6 0.27 272 / 1);
+    --color-3: oklch(0.55 0.3 288 / 1);
+    --color-4: oklch(0.55 0.33 306 / 1);
+    --speed: 2s;
+}
+
+
+
+
+
+/* had to hack the animation onto the parent; chrome won't allow a css animation
+    keyframe to be applied to the progress-value (!??) */
+
+@property --bgpos {
+  syntax: "<percentage>";
+  initial-value: 0%;
+  inherits: true;
+}
+
+@keyframes bg-scroll {
+    0%, 99.999%, 100% {
+        --bgpos: 0%;
+    }
+    99.99% {
+        --bgpos: -100%;
+    }
+}
+
+#app {
+    animation: bg-scroll var(--speed, 0.8s) linear infinite;
+}
+
+#app[data-reverse] {
+    animation-direction: reverse;
+}
+
+#app[data-alternate] {
+    animation-direction: alternate;
+    animation-timing-function: var(--cubic);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* demo adjacent code, not related to the <progress> bars */
+
+:root {
+    
+    color-scheme: light dark;
+    
+    --bg-light: hsl(220, 16%, 94%);
+    --bg-light2: hsl(212, 50%, 92%);
+    --bg-dark: hsl(222, 16%, 16%);
+    --bg-dark2: hsl(222, 20%, 18%);
+    --fg-light: hsl(212 22% 26%);
+    --fg-dark: hsl(222, 39%, 95%);
+    --link-light: hsl(222, 95%, 60%);
+    --link-dark: hsl(222, 95%, 70%);
+    --link-light-hover: hsl(150, 90%, 50%);
+    --link-dark-hover: hsl(150, 95%, 70%);
+    --input-bg-light: hsl(from var(--bg-light) h 15% 100%);
+    --input-bg-dark: hsl(from var(--bg-dark) h 15% 10%);
+    --input-border-light: hsl(from var(--bg-light) h 15% 85%);
+    --input-border-dark: hsl(from var(--bg-light) h 15% 35%);
+    --labels-light: hsl(from var(--fg-light) h 20% 55%);
+    --labels-dark: hsl(from var(--fg-dark) h 20% 55%);
+    
+    /* color-scheme */
+    --bg: light-dark( var(--bg-light), var(--bg-dark) );
+    --bg2: light-dark( var(--bg-light2), var(--bg-dark2) );
+    --fg: light-dark( var(--fg-light), var(--fg-dark) ) ;
+    --link: light-dark( var(--link-light), var(--link-dark) );
+    --linkh: light-dark( var(--link-light-hover), var(--link-dark-hover) );
+    --labels: light-dark( var(--labels-light), var(--labels-dark) );  /* form labels */
+    --b: light-dark( var(--input-bg-light), var(--input-bg-dark) ); /* form element backgrounds */
+    --bor: light-dark( var(--input-border-light), var(--input-border-dark) ); /* form element shadows */
+    --tint: light-dark( hsl(160, 85%, 60%), hsl(260, 85%, 60%) );
+    --tint2: light-dark( hsl(200, 85%, 60%), hsl(300, 85%, 60%) );
+    
+    /* ease */
+    --cubic: cubic-bezier(0.66, 0, 0.34, 1);
+    --cubic-in: cubic-bezier(0.32, 0, 0.67, 0);
+    --cubic-out: cubic-bezier(0.33, 1, 0.68, 1);
+    --spring: linear(0, 0.008 1.1%, 0.034 2.3%, 0.134 4.9%, 0.264 7.3%, 0.683 14.3%, 0.797 16.5%, 0.89 18.6%, 0.967 20.7%, 1.027 22.8%, 1.073 25%, 1.104 27.3%, 1.123 30.6%, 1.119 34.3%, 1.018 49.5%, 0.988 58.6%, 0.985 65.2%, 1 84.5%, 1);
+    
+}
+
+/** extra stuff **/
+
+body, html, #app {
+    display: grid;
+    min-height: 100%;
+}
+
+body {
+    --dot-color: light-dark( 
+        hsl( from var(--bg) h s calc(l - 7) / 90%),
+        hsl( from var(--bg2) h s calc(l + 2) / 90%)
+    );
+    --bg-fade: light-dark(
+        var(--bg2),
+        var(--bg)
+    );
+    
+    background-color: var(--bg2);
+    background-image: 
+        radial-gradient( var(--dot-color) 1.25px, transparent 0px ),
+        linear-gradient(160deg, var(--bg), var(--bg-fade));
+    background-repeat: repeat, no-repeat;
+    background-size: 24px 24px, cover;
+    background-position: center;
+    padding: 0;
+}
+
+#app {
+    min-height: 90svh;
+    width: min(100%,60em);
+    margin: auto;
+    padding: 1em;
+    grid-template-rows:
+        auto min-content auto;
+}
+
+h1 {
+    place-content: end;
+    margin-bottom: 0;
+    & code {
+        font-weight: normal;
+    }
+}
+
+section {
+    display: flex;
+    flex-direction: column;
+    gap: 2em;
+}
+
+aside {
+    margin: auto auto 0;
+    padding-inline: 2em;
+    max-width: 86ch;
+    line-height: 1.4;
+    text-wrap: balance;
+    text-align: center;
+}
+
+.field {
+    display: flex;
+    margin: 0;
+    position: relative;
+    &:not(.ranges) {
+        flex-direction: column;
+    }
+    .range {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5em;
+    }
+}
+
+.range {
+    flex: 1 1 33%;
+    margin-block: 0;
+}
+
+.field:has(progress) label {
+    font-family: 'M PLUS 1 Code', monospace;
+    font-size: min(1em, var(--size));
+    height: 100%;
+    padding: 0.25em max(1.5em, var(--size));
+    position: absolute;
+    margin: 0;
+    align-content: center;
+    justify-self: center;
+    text-shadow: 0 1px 0 oklch(1 0 0 / 0.5);
+    opacity: 0.66;
+    transition: none;
+}
+
+.field:has(.group.style) {
+    overflow-x: auto;
+    padding-bottom: 10px;
+    mask: linear-gradient(to left, transparent, black 30px calc(100% - 30px), transparent);
+    padding-inline: 30px;
+    scrollbar-width: thin;
+}
+
+.group.style {
+    margin: auto;
+}
+
+[for=loading] em {
+    cursor: pointer;
+    text-transform: none;
+    font-size: 0.875em;
+    user-select: none;
+}
